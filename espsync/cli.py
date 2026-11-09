@@ -276,18 +276,37 @@ def cmd_hue_import(args: argparse.Namespace) -> int:
 
 
 def cmd_hue_test(args: argparse.Namespace) -> int:
-    """Stream a colour chase straight to the area (no screen capture)."""
+    """Stream test colours straight to the area (no screen capture).
+
+    chase     : a rainbow running across the channels
+    positions : first half front red / back blue, second half left green /
+                right magenta, as the bridge has the lights placed
+    """
     import colorsys
 
     import numpy as np
 
     from .config import SyncSettings
+    from .engine import _set_timer_resolution
+    from .hue import HueApi
     from .lights.hue import HueEntertainmentStream
 
     cfg = load_config(_cfg_path(args))
     bridge = _need_bridge(cfg, args.bridge)
     if bridge is None:
         return 2
+
+    def positions(area, second_half: bool) -> np.ndarray:  # noqa: ANN001
+        out = []
+        for c in area.channels:
+            v = c.x if second_half else c.y
+            if v > 0.2:
+                out.append((1.0, 0.0, 1.0) if second_half else (1.0, 0.0, 0.0))
+            elif v < -0.2:
+                out.append((0.0, 1.0, 0.0) if second_half else (0.0, 0.0, 1.0))
+            else:
+                out.append((0.15, 0.15, 0.15))
+        return np.array(out, np.float32)
 
     async def run() -> int:
         stream = HueEntertainmentStream(bridge, SyncSettings(hue_rate_hz=args.rate))
@@ -296,17 +315,27 @@ def cmd_hue_test(args: argparse.Namespace) -> int:
             print(f"Stream did not start: {stream.status_text()}", file=sys.stderr)
             await stream.stop()
             return 1
-        assert stream.area is not None
-        chans = [c.channel_id for c in stream.area.channels]
-        print(f"Streaming to {stream.area.name!r}: {len(chans)} channels at up to {args.rate:.0f} Hz")
+        area = stream.area
+        assert area is not None
+        chans = [c.channel_id for c in area.channels]
+        print(f"Streaming to {area.name!r}: {len(chans)} channels at up to {args.rate:.0f} Hz")
         t0 = time.monotonic()
         next_print = t0 + 1.0
         frames = 0
+        half = None
         try:
             while (now := time.monotonic()) - t0 < args.seconds:
-                phase = (now - t0) / 4.0
-                colors = np.array([colorsys.hsv_to_rgb((phase + i / max(len(chans), 1)) % 1.0, 1.0, 1.0)
-                                   for i in range(len(chans))], np.float32)
+                if args.pattern == "positions":
+                    second = now - t0 >= args.seconds / 2
+                    if second != half:
+                        half = second
+                        print("  left = green, right = magenta" if second else
+                              "  front (screen side) = red, back = blue", flush=True)
+                    colors = positions(area, second)
+                else:
+                    phase = (now - t0) / 4.0
+                    colors = np.array([colorsys.hsv_to_rgb((phase + i / max(len(chans), 1)) % 1.0, 1.0, 1.0)
+                                       for i in range(len(chans))], np.float32)
                 stream.write(chans, colors)
                 frames += 1
                 if now >= next_print:
@@ -317,9 +346,15 @@ def cmd_hue_test(args: argparse.Namespace) -> int:
             await stream.stop()
         elapsed = max(time.monotonic() - t0, 1e-3)
         print(f"Stopped. {stream.sent} packets in {elapsed:.1f} s ({stream.sent / elapsed:.1f}/s), {frames} frames.")
+        after = await HueApi(bridge.host, bridge.app_key).area(bridge.entertainment_id)
+        print(f"Area status now: {after.status}")
         return 0
 
-    return asyncio.run(run())
+    _set_timer_resolution(True)  # 1 ms sleeps on Windows, as while syncing
+    try:
+        return asyncio.run(run())
+    finally:
+        _set_timer_resolution(False)
 
 
 def _print_stats(engine) -> None:  # noqa: ANN001
@@ -464,6 +499,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--bridge", help="bridge name/id/host (default: the only one)")
     s.add_argument("--seconds", type=float, default=10.0)
     s.add_argument("--rate", type=float, default=50.0, help="max packets per second")
+    s.add_argument("--pattern", choices=["chase", "positions"], default="chase",
+                   help="positions: front red / back blue, then left green / right magenta")
     s.set_defaults(func=cmd_hue_test)
 
     s = sub.add_parser("monitors", help="list displays")

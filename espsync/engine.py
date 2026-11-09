@@ -88,6 +88,7 @@ class SyncEngine:
         self._capture_thread: threading.Thread | None = None
         self._running = threading.Event()
         self._generation = 0  # bumped per start(); a stale capture thread sees it and exits
+        self._restarting = False  # stop() is half of restart(): keep Hue areas streaming
         self._lock = threading.Lock()
         self._regions_dirty = True
         self._colors: dict[str, np.ndarray] = {}
@@ -167,7 +168,11 @@ class SyncEngine:
     def restart(self) -> None:
         if self.running:
             send = self.sending
-            self.stop(restore=False)
+            self._restarting = True
+            try:
+                self.stop(restore=False)
+            finally:
+                self._restarting = False
             self.start(send=send)
 
     def colors(self) -> dict[str, np.ndarray]:
@@ -274,10 +279,14 @@ class SyncEngine:
                 await ctl.stop(restore)
             except Exception:  # noqa: BLE001
                 log.exception("restoring effect")
-        # Hue: close the DTLS session and end the stream; the bridge restores
-        # the lights.  On a restart (restore=False) the area stays active so the
-        # lights hold their colour until the new session takes over.
-        await asyncio.gather(*(s.stop(deactivate=restore) for s in self._hue.values()), return_exceptions=True)
+        # Hue: close the DTLS session, end the stream and put the lights back.
+        # On a restart the area stays active so the lights hold their colour
+        # until the new session takes over.
+        keep = self._restarting
+        await asyncio.gather(
+            *(s.stop(deactivate=not keep, restore=restore and not keep) for s in self._hue.values()),
+            return_exceptions=True,
+        )
         await asyncio.sleep(0.15)  # let final commands leave the socket
         for dev in self._devices.values():
             await dev.stop()

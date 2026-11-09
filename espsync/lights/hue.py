@@ -16,7 +16,13 @@ Stream lifecycle (all on the engine's network loop):
 4. stream; resend the last packet when idle so the bridge keeps the session;
    poll the area every few seconds and on loss (another app took over, the
    bridge ended it) reconnect when the area is free again,
-5. on stop: close_notify, ``{"action": "stop"}``; the bridge restores the lights.
+5. on stop: close_notify, ``{"action": "stop"}``, then put the lights back.
+
+The bridge does *not* restore lights when a stream ends (checked on a BSB002,
+firmware 1978545030): they keep the last streamed colour.  So before the first
+start the stream reads the area's lights over REST and writes them back after
+the stop.  While an area streams, the REST light state keeps the pre-stream
+values, so a snapshot taken after an EspSync restart is still the original.
 """
 
 from __future__ import annotations
@@ -31,7 +37,7 @@ from typing import Protocol
 import numpy as np
 
 from ..config import HueBridgeConfig, LightConfig, SyncSettings
-from ..hue import STREAM_PORT, HueApi, HueArea, HueAuthError, HueError
+from ..hue import STREAM_PORT, HueApi, HueArea, HueAuthError, HueError, restore_payload
 from .base import LightOutput
 from .dtls import DtlsAlert, DtlsError, DtlsPskClient
 
@@ -45,6 +51,7 @@ KEEPALIVE_S = 1.0  # resend the last packet after this long without one (bridge 
 WATCH_S = 5.0  # poll the area's status this often while streaming
 RETRY_S = 5.0  # wait between reconnect attempts
 CONNECT_TIMEOUT = 8.0
+RESTORE_GAP_S = 0.1  # between light commands: the bridge takes ~10 REST commands a second
 
 
 def huestream_packet(area_id: str, channels: Iterable[tuple[int, bytes]], sequence: int = 0) -> bytes:
@@ -115,6 +122,11 @@ class HueEntertainmentStream:
         self._transport: StreamTransport | None = None
         self._frame: dict[int, bytes] = {}
         self._sequence = 0
+        # Rate limit on perf_counter: asyncio's clock on Windows (CPython 3.12)
+        # ticks every 15.6 ms and fires timers up to a tick early, so pacing by
+        # the time of the last send overshoots (~58 Hz for 50).  Instead each
+        # packet takes the next slot on a fixed grid, which caps the average.
+        self._next_slot = 0.0
         self._last_send = -1e9
         self._last_packets: list[bytes] = []
         self._flush_handle: asyncio.Handle | None = None
@@ -126,6 +138,7 @@ class HueEntertainmentStream:
         self._lost = asyncio.Event()
         self._stopping = False
         self._activated = False  # we sent {"action": "start"} and not yet "stop"
+        self._snapshot: dict[str, dict] | None = None  # light id -> CLIP v2 state before streaming
 
     # ------------------------------------------------------------------ state
     @property
@@ -138,7 +151,10 @@ class HueEntertainmentStream:
 
     def status_text(self) -> str:
         if self.ready:
-            return f"streaming {self.rate_hz:.0f} Hz"
+            rate = self.rate_hz
+            if not rate and self._rate_n:  # first second: measure what we have so far
+                rate = self._rate_n / max(time.perf_counter() - self._rate_t0, 1e-3)
+            return f"streaming {rate:.0f} Hz"
         return f"{self.status}: {self.error}" if self.error else self.status
 
     async def wait_ready(self, timeout: float) -> bool:
@@ -192,6 +208,11 @@ class HueEntertainmentStream:
         self.area = area
         if area.status == "active" and area.streamer and app_id and area.streamer != app_id:
             raise HueError(f"'{area.name}' is in use by another app (Hue Sync?): stop it there first")
+        if self._snapshot is None:
+            try:
+                self._snapshot = await self.api.light_states(area.light_ids)
+            except HueError as exc:
+                log.warning("Hue %s: couldn't read the lights to restore later: %s", b.name, exc)
         await self.api.set_streaming(b.entertainment_id, True)
         self._activated = True
         self._lost.clear()
@@ -202,7 +223,7 @@ class HueEntertainmentStream:
         self._transport = transport
         self.status = "ready"
         self.error = None
-        self._rate_t0 = time.monotonic()
+        self._rate_t0 = time.perf_counter()
         self._rate_n = 0
         self._ready.set()
         self._schedule_tick()
@@ -244,9 +265,14 @@ class HueEntertainmentStream:
             self._transport = None
         self.rate_hz = 0.0
 
-    async def stop(self, deactivate: bool = True) -> None:
-        """Stop streaming.  deactivate=False leaves the area active (restarts:
-        the lights hold their colour until the next session takes over)."""
+    async def stop(self, deactivate: bool = True, restore: bool | None = None) -> None:
+        """Stop streaming.
+
+        deactivate=False leaves the area active (restarts: the lights hold their
+        colour until the next session takes over).  restore (default: same as
+        deactivate) puts the lights back the way they were before streaming.
+        """
+        restore = deactivate if restore is None else restore
         self._stopping = True
         if self._task is not None:
             self._task.cancel()
@@ -262,7 +288,22 @@ class HueEntertainmentStream:
             except Exception as exc:  # noqa: BLE001
                 log.warning("Hue %s: stopping the stream failed: %s", self.bridge.name, exc)
             self._activated = False
+            if restore:
+                try:
+                    await asyncio.wait_for(self._restore(), 10.0)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Hue %s: restoring the lights failed: %s", self.bridge.name, exc)
         self.status = "idle"
+
+    async def _restore(self) -> None:
+        snapshot, self._snapshot = self._snapshot, None
+        for i, (light_id, state) in enumerate((snapshot or {}).items()):
+            if i:
+                await asyncio.sleep(RESTORE_GAP_S)
+            try:
+                await self.api.put_light(light_id, restore_payload(state))
+            except HueError as exc:
+                log.warning("Hue %s: restoring %s failed: %s", self.bridge.name, light_id, exc)
 
     # ---------------------------------------------------------------- frames
     def write(self, channel_ids: list[int], colors: np.ndarray) -> None:
@@ -275,7 +316,7 @@ class HueEntertainmentStream:
         if self._flush_handle is not None or not self.ready:
             return
         loop = asyncio.get_running_loop()
-        wait = self._last_send + self.interval - loop.time()
+        wait = self._next_slot - time.perf_counter()
         if wait <= 0:
             # call_soon: run after every output has written this frame.
             self._flush_handle = loop.call_soon(self._flush)
@@ -306,7 +347,9 @@ class HueEntertainmentStream:
             self._lost.set()
             return
         self._last_packets = packets
-        self._last_send = asyncio.get_running_loop().time()
+        now = time.perf_counter()
+        self._last_send = now
+        self._next_slot = max(self._next_slot, now - self.interval) + self.interval
         self.sent += 1
         self._rate_n += 1
 
@@ -318,10 +361,9 @@ class HueEntertainmentStream:
         self._tick_handle = None
         if not self.ready:
             return
-        loop = asyncio.get_running_loop()
-        if self._last_packets and loop.time() - self._last_send >= KEEPALIVE_S:
+        if self._last_packets and time.perf_counter() - self._last_send >= KEEPALIVE_S:
             self._send(self._last_packets)
-        now = time.monotonic()
+        now = time.perf_counter()
         if now - self._rate_t0 >= 1.0:
             self.rate_hz = self._rate_n / (now - self._rate_t0)
             self._rate_t0, self._rate_n = now, 0

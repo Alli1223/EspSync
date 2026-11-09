@@ -18,6 +18,7 @@ from espsync.hue import (
     hue_to_room,
     lights_for_area,
     parse_area,
+    restore_payload,
     room_to_hue,
 )
 from espsync.lights.hue import HueEntertainmentStream, HueLightOutput, huestream_packet, to_rgb16
@@ -78,13 +79,14 @@ def _raw_area(status="inactive", streamer=None):
         "metadata": {"name": "TV area"},
         "configuration_type": "screen",
         "status": status,
+        "light_services": [{"rid": "light-1", "rtype": "light"}, {"rid": "light-2", "rtype": "light"}],
         "channels": [
             {"channel_id": 0, "position": {"x": -0.8, "y": 0.8, "z": 0.0},
              "members": [{"service": {"rid": "svc-lamp", "rtype": "entertainment"}, "index": 0}]},
             {"channel_id": 1, "position": {"x": -0.4, "y": 1.0, "z": 0.4},
              "members": [{"service": {"rid": "svc-grad", "rtype": "entertainment"}, "index": 0}]},
             {"channel_id": 3, "position": {"x": 0.4, "y": 1.0, "z": 0.4},
-             "members": [{"service": {"rid": "svc-grad", "rtype": "entertainment"}, "index": 2}]},
+             "members": [{"service": {"rid": "svc-grad", "rtype": "entertainment"}, "index": 4}]},
             {"channel_id": 2, "position": {"x": 0.0, "y": 1.0, "z": 0.6},
              "members": [{"service": {"rid": "svc-grad", "rtype": "entertainment"}, "index": 1}]},
         ],
@@ -102,9 +104,12 @@ def test_parse_area_names_segments_and_order():
     assert (area.id, area.name, area.kind, area.status, area.streamer) == (
         AREA_ID, "TV area", "screen", "active", "other-app")
     assert [c.channel_id for c in area.channels] == [0, 1, 2, 3]
+    assert area.light_ids == ["light-1", "light-2"]
     lamp, g0, g1, g2 = area.channels
     assert lamp.label == "Floor lamp" and lamp.segments == 1 and lamp.light_id == "light-1"
+    # Member index 4 is the light's 5th segment, but the 3rd of the three in this area.
     assert (g0.label, g1.label, g2.label) == ("Play gradient (1/3)", "Play gradient (2/3)", "Play gradient (3/3)")
+    assert (g2.index, g2.ordinal) == (4, 2)
     assert (g0.x, g0.y, g0.z) == (-0.4, 1.0, 0.4)
 
 
@@ -207,6 +212,19 @@ class FakeApi:
         self._area = area
         self.app_id = app_id
         self.streaming_calls: list[bool] = []
+        self.lights = {lid: {"id": lid, "on": {"on": True}, "dimming": {"brightness": 40.0},
+                             "color": {"xy": {"x": 0.3, "y": 0.3}}} for lid in area.light_ids}
+        self.snapshots = 0
+        self.puts: list[tuple[str, dict]] = []
+        self.log: list[str] = []
+
+    async def light_states(self, ids):
+        self.snapshots += 1
+        return {i: self.lights[i] for i in ids if i in self.lights}
+
+    async def put_light(self, light_id, body):
+        self.log.append(f"put {light_id}")
+        self.puts.append((light_id, body))
 
     async def application_id(self) -> str:
         return self.app_id
@@ -215,6 +233,7 @@ class FakeApi:
         return self._area
 
     async def set_streaming(self, area_id: str, active: bool) -> None:
+        self.log.append(f"streaming {active}")
         self.streaming_calls.append(active)
         self._area.status = "active" if active else "inactive"
         self._area.streamer = self.app_id if active else ""
@@ -234,7 +253,8 @@ class FakeTransport:
 
 def _area(channels=(0, 1, 2), status="inactive", streamer=""):
     return HueArea(id=AREA_ID, name="TV area", status=status, streamer=streamer,
-                   channels=[HueChannel(c, 0, 0, 0, name=f"L{c}") for c in channels])
+                   channels=[HueChannel(c, 0, 0, 0, name=f"L{c}") for c in channels],
+                   light_ids=[f"light-{c}" for c in channels])
 
 
 def _bridge():
@@ -368,9 +388,75 @@ def test_stream_stop_without_deactivate_keeps_area_active():
         stream.start()
         assert await stream.wait_ready(2)
         await stream.stop(deactivate=False)
-        assert api.streaming_calls == [True]
+        assert api.streaming_calls == [True] and api.puts == []  # no restore on a restart
 
     asyncio.run(main())
+
+
+def test_stream_restores_lights_after_stop(monkeypatch):
+    monkeypatch.setattr(hue_out, "RESTORE_GAP_S", 0.0)
+
+    async def main():
+        api = FakeApi(_area((0, 1)))
+        api.lights["light-1"] = {"id": "light-1", "on": {"on": False}}
+        stream, _ = _stream(api)
+        stream.start()
+        assert await stream.wait_ready(2)
+        assert api.snapshots == 1
+        await stream.stop()
+        # The bridge doesn't restore: stop the stream first, then put each light back.
+        assert api.log == ["streaming True", "streaming False", "put light-0", "put light-1"]
+        assert dict(api.puts) == {
+            "light-0": {"on": {"on": True}, "dynamics": {"duration": 400}, "dimming": {"brightness": 40.0},
+                        "color": {"xy": {"x": 0.3, "y": 0.3}}},
+            "light-1": {"on": {"on": False}, "dynamics": {"duration": 400}},
+        }
+
+    asyncio.run(main())
+
+
+def test_stream_stop_without_restore_still_frees_the_area():
+    async def main():
+        api = FakeApi(_area())
+        stream, _ = _stream(api)
+        stream.start()
+        assert await stream.wait_ready(2)
+        await stream.stop(restore=False)
+        assert api.streaming_calls == [True, False] and api.puts == []
+
+    asyncio.run(main())
+
+
+def test_snapshot_is_taken_once_across_reconnects(monkeypatch):
+    monkeypatch.setattr(hue_out, "RETRY_S", 0.05)
+
+    async def main():
+        api = FakeApi(_area())
+        stream, transports = _stream(api)
+        stream.start()
+        assert await stream.wait_ready(2)
+        stream.connection_lost(None)
+        await asyncio.sleep(0.2)
+        assert len(transports) == 2 and api.snapshots == 1  # not re-read while lights show stream colours
+        await stream.stop()
+
+    asyncio.run(main())
+
+
+def test_restore_payload_variants():
+    ct = {"on": {"on": True}, "dimming": {"brightness": 55.0},
+          "color_temperature": {"mirek": 366, "mirek_valid": True}, "color": {"xy": {"x": 0.45, "y": 0.41}}}
+    assert restore_payload(ct) == {"on": {"on": True}, "dynamics": {"duration": 400},
+                                   "dimming": {"brightness": 55.0}, "color_temperature": {"mirek": 366}}
+    xy = dict(ct, color_temperature={"mirek": None, "mirek_valid": False})
+    body = restore_payload(xy)
+    assert body["color"] == {"xy": {"x": 0.45, "y": 0.41}} and "color_temperature" not in body
+    points = [{"color": {"xy": {"x": 0.1, "y": 0.2}}}, {"color": {"xy": {"x": 0.3, "y": 0.4}}}]
+    body = restore_payload(dict(xy, gradient={"points": points, "points_capable": 5}))
+    assert body["gradient"] == {"points": points} and "color" not in body
+    assert restore_payload(dict(xy, effects={"status": "candle"}))["effects"] == {"effect": "candle"}
+    assert restore_payload({"on": {"on": False}, "dimming": {"brightness": 9.0}}) == {
+        "on": {"on": False}, "dynamics": {"duration": 400}}
 
 
 def test_dtls_close_triggers_reconnect(monkeypatch):
@@ -473,5 +559,37 @@ def test_engine_streams_hue_lights(monkeypatch):
         assert "streaming" in eng.stream_status()["Bridge"]
         await eng._stop_outputs(restore=True)
         assert t.closed and api.streaming_calls == [True, False] and not eng._hue
+        assert [p[0] for p in api.puts] == ["light-0", "light-1"]  # restored
 
     asyncio.run(main())
+
+
+def test_engine_restart_keeps_hue_area_streaming(monkeypatch):
+    from espsync import engine as engine_mod
+
+    stops = []
+
+    class Stream:
+        def __init__(self, bridge, settings):
+            self.bridge = bridge
+
+        def start(self):
+            pass
+
+        async def stop(self, deactivate=True, restore=None):
+            stops.append((deactivate, restore))
+
+    eng = engine_mod.SyncEngine(AppConfig())
+
+    async def main():
+        eng._hue = {"b": Stream(_bridge(), None)}
+        eng._restarting = True
+        await eng._stop_outputs(restore=False)
+        eng._hue = {"b": Stream(_bridge(), None)}
+        eng._restarting = False
+        await eng._stop_outputs(restore=False)  # user stop with restore_on_stop off
+        eng._hue = {"b": Stream(_bridge(), None)}
+        await eng._stop_outputs(restore=True)
+
+    asyncio.run(main())
+    assert stops == [(False, False), (True, False), (True, True)]

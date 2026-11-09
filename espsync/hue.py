@@ -189,14 +189,15 @@ class HueChannel:
     z: float
     name: str = ""  # light (device) name
     service: str = ""  # entertainment service id; channels sharing one are segments of one light
-    index: int = 0  # segment index within that light
+    index: int = 0  # the light's own segment index (a 7-segment strip may use 0, 1, 4 in an area)
     segments: int = 1  # channels that light has in this area
+    ordinal: int = 0  # 0-based position among those channels, by segment index
     light_id: str = ""  # CLIP v2 light resource (for identify)
 
     @property
     def label(self) -> str:
         if self.segments > 1:
-            return f"{self.name} ({self.index + 1}/{self.segments})"
+            return f"{self.name} ({self.ordinal + 1}/{self.segments})"
         return self.name or f"Channel {self.channel_id}"
 
 
@@ -208,6 +209,7 @@ class HueArea:
     status: str = "inactive"
     streamer: str = ""  # application id of the app streaming, when active
     channels: list[HueChannel] = field(default_factory=list)
+    light_ids: list[str] = field(default_factory=list)  # CLIP v2 lights in the area
 
 
 def parse_area(raw: dict[str, Any], names: dict[str, tuple[str, str]] | None = None) -> HueArea:
@@ -227,11 +229,14 @@ def parse_area(raw: dict[str, Any], names: dict[str, tuple[str, str]] | None = N
             x=float(pos.get("x", 0.0)), y=float(pos.get("y", 0.0)), z=float(pos.get("z", 0.0)),
             name=names.get(svc, ("", ""))[0], service=svc, index=idx, light_id=names.get(svc, ("", ""))[1],
         ))
-    per_service: dict[str, int] = {}
+    per_service: dict[str, list[HueChannel]] = {}
     for c in channels:
-        per_service[c.service] = per_service.get(c.service, 0) + 1
-    for c in channels:
-        c.segments = per_service[c.service] if c.service else 1
+        if c.service:
+            per_service.setdefault(c.service, []).append(c)
+    for group in per_service.values():
+        group.sort(key=lambda c: (c.index, c.channel_id))
+        for i, c in enumerate(group):
+            c.segments, c.ordinal = len(group), i
     streamer = raw.get("active_streamer") or {}
     return HueArea(
         id=raw.get("id", ""),
@@ -240,7 +245,31 @@ def parse_area(raw: dict[str, Any], names: dict[str, tuple[str, str]] | None = N
         status=raw.get("status", "inactive"),
         streamer=streamer.get("rid", "") if isinstance(streamer, dict) else "",
         channels=sorted(channels, key=lambda c: c.channel_id),
+        light_ids=[l.get("rid", "") for l in raw.get("light_services") or [] if l.get("rid")],
     )
+
+
+def restore_payload(light: dict[str, Any], fade_ms: int = 400) -> dict[str, Any]:
+    """PUT body that puts a light back the way a CLIP v2 GET described it."""
+    on = bool((light.get("on") or {}).get("on"))
+    body: dict[str, Any] = {"on": {"on": on}, "dynamics": {"duration": fade_ms}}
+    if not on:
+        return body
+    if "brightness" in (light.get("dimming") or {}):
+        body["dimming"] = {"brightness": light["dimming"]["brightness"]}
+    points = (light.get("gradient") or {}).get("points") or []
+    ct = light.get("color_temperature") or {}
+    xy = (light.get("color") or {}).get("xy")
+    if points:
+        body["gradient"] = {"points": [{"color": {"xy": p["color"]["xy"]}} for p in points if "color" in p]}
+    elif ct.get("mirek_valid") and ct.get("mirek"):
+        body["color_temperature"] = {"mirek": ct["mirek"]}
+    elif xy:
+        body["color"] = {"xy": {"x": xy["x"], "y": xy["y"]}}
+    effect = (light.get("effects") or {}).get("status")
+    if effect and effect != "no_effect":
+        body["effects"] = {"effect": effect}
+    return body
 
 
 class HueApi:
@@ -299,6 +328,13 @@ class HueApi:
         if not raw:
             raise HueError("entertainment area not found (deleted in the Hue app?)")
         return parse_area(raw[0], await self.light_names() if with_names else None)
+
+    async def light_states(self, light_ids: list[str]) -> dict[str, dict[str, Any]]:
+        wanted = set(light_ids)
+        return {l["id"]: l for l in await self.get("light") if l.get("id") in wanted}
+
+    async def put_light(self, light_id: str, body: dict[str, Any]) -> None:
+        await self._call("PUT", f"/clip/v2/resource/light/{light_id}", body)
 
     async def set_streaming(self, area_id: str, active: bool) -> None:
         await self._call(
