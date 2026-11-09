@@ -1,0 +1,88 @@
+"""Common types for screen capture backends."""
+
+from __future__ import annotations
+
+import time
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+
+import numpy as np
+
+# Target width of the image handed to the colour pipeline.  Colours are averaged
+# over regions anyway, so a small image is plenty and keeps processing ~1 ms.
+TARGET_WIDTH = 160
+
+
+class CaptureError(RuntimeError):
+    """The backend cannot capture right now (retry later)."""
+
+
+@dataclass
+class MonitorInfo:
+    index: int
+    name: str
+    x: int
+    y: int
+    width: int
+    height: int
+    primary: bool = False
+    hdr: bool | None = None  # None = unknown
+
+    def label(self) -> str:
+        hdr = " HDR" if self.hdr else ""
+        prim = " (primary)" if self.primary else ""
+        return f"{self.index + 1}: {self.name} {self.width}x{self.height}{hdr}{prim}"
+
+
+@dataclass
+class Frame:
+    """A downscaled capture in *linear light*.
+
+    `image` is float32 (h, w, 3).  1.0 is SDR reference white; HDR content may
+    exceed 1.0 up to `peak` (also relative to SDR white).
+    """
+
+    image: np.ndarray
+    source_size: tuple[int, int]
+    hdr: bool = False
+    peak: float = 1.0
+    timestamp: float = field(default_factory=time.perf_counter)
+
+    @property
+    def aspect(self) -> float:
+        w, h = self.source_size
+        return w / h if h else 16 / 9
+
+
+def _srgb_to_linear_lut() -> np.ndarray:
+    c = np.arange(256, dtype=np.float64) / 255.0
+    lin = np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+    return lin.astype(np.float32)
+
+
+SRGB_TO_LINEAR = _srgb_to_linear_lut()
+
+
+def bgra_to_linear(bgra: np.ndarray) -> np.ndarray:
+    """uint8 BGRA/BGRX (h, w, 4) -> float32 linear RGB (h, w, 3)."""
+    return SRGB_TO_LINEAR[bgra[..., 2::-1]]
+
+
+class CaptureBackend(ABC):
+    name = "base"
+
+    def __init__(self, monitor: int = 0) -> None:
+        self.monitor = monitor
+
+    @abstractmethod
+    def grab(self, timeout_ms: int = 100) -> Frame | None:
+        """Return the newest frame, or None if the screen has not changed."""
+
+    def close(self) -> None:  # noqa: B027 - optional hook
+        pass
+
+    def __enter__(self) -> CaptureBackend:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
