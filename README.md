@@ -15,6 +15,9 @@ on **Windows and Linux**.
   presets for bottom/top/side edges, U-shapes and full loops.
 * Live preview of what every light is sampling; letterbox detection; vivid or
   average colour modes; smoothing presets; lights restored when you stop.
+* **World of Warcraft effects.** With the small EspSync addon, the lights pulse
+  red when your health is low and a gold sweep circles the room when you level
+  up. See [integrations/wow](integrations/wow/README.md).
 
 ## Install
 
@@ -226,7 +229,7 @@ two points you drag in the room.
                                                      │
                     per-light regions (from room layout) ─► mean / vivid colour
                                                      │
-                          smoothing ─► latest-value-wins per light (no queues)
+                          smoothing ─► game effects (WoW) ─► latest-value-wins per light (no queues)
                                                      │
               ESPHome native API (TCP, Noise)  /  WLED or E1.31 UDP
 ```

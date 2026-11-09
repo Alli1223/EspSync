@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QPushButton,
     QScrollArea,
@@ -26,6 +27,8 @@ BACKEND_LABELS = {
     "portal": "Screen-cast portal (Wayland)",
     "mss": "mss (X11 / portable, SDR)",
 }
+
+WOW_HELP_URL = "https://github.com/Alli1223/EspSync/blob/main/integrations/wow/README.md"
 
 SMOOTHING_PRESETS = [("Instant (gaming)", 0), ("Fast", 40), ("Balanced", 80), ("Smooth (movies)", 160), ("Subtle", 320)]
 
@@ -48,6 +51,7 @@ def _spin(lo: float, hi: float, step: float, decimals: int = 2, suffix: str = ""
 class SettingsPanel(QScrollArea):
     changed = Signal(str)  # "sync" | "room" | "output" | "capture" | "updates"
     checkUpdatesRequested = Signal()
+    testEffectRequested = Signal(str)  # "levelup" | "lowhealth"
 
     def __init__(self, config: AppConfig, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -143,6 +147,34 @@ class SettingsPanel(QScrollArea):
         f.addRow("", self.restore)
         col.addWidget(out)
 
+        # ------------------------------------------------------ game effects
+        game = QGroupBox("Game effects")
+        f = QFormLayout(game)
+        self.wow = QCheckBox("World of Warcraft: red pulse at low health, gold sweep on level-up")
+        self.wow.setToolTip("Active only while WoW runs with the EspSync addon, which draws a thin strip "
+                            "in the top-left corner of the screen")
+        self.wow_threshold = QSpinBox()
+        self.wow_threshold.setRange(5, 90)
+        self.wow_threshold.setSuffix(" %")
+        self.wow_threshold.setToolTip("The lights pulse red below this much health, faster and stronger as it drops")
+        tests = QWidget()
+        row = QHBoxLayout(tests)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.test_low_health = QPushButton("Test low health")
+        self.test_levelup = QPushButton("Test level-up")
+        row.addWidget(self.test_low_health)
+        row.addWidget(self.test_levelup)
+        row.addStretch(1)
+        self.test_low_health.clicked.connect(lambda: self.testEffectRequested.emit("lowhealth"))
+        self.test_levelup.clicked.connect(lambda: self.testEffectRequested.emit("levelup"))
+        help_label = QLabel(f'Needs the EspSync addon in WoW: <a href="{WOW_HELP_URL}">setup</a>')
+        help_label.setOpenExternalLinks(True)
+        f.addRow("", self.wow)
+        f.addRow("Low health below", self.wow_threshold)
+        f.addRow("", tests)
+        f.addRow("", help_label)
+        col.addWidget(game)
+
         # -------------------------------------------------------------- room
         room = QGroupBox("Room")
         f = QFormLayout(room)
@@ -225,6 +257,9 @@ class SettingsPanel(QScrollArea):
         self.udp_rate.setValue(round(s.udp_rate_hz))
         self.transition.setValue(round(s.transition_ms))
         self.restore.setChecked(s.restore_on_stop)
+        self.wow.setChecked(s.wow_effects)
+        self.wow_threshold.setValue(round(s.wow_low_health * 100))
+        self.wow_threshold.setEnabled(s.wow_effects)
         self.room_w.setValue(r.width_m)
         self.room_d.setValue(r.depth_m)
         self.tv_width.setValue(round(r.tv_width * 100))
@@ -267,6 +302,9 @@ class SettingsPanel(QScrollArea):
         bind(self.udp_rate.valueChanged, s, "udp_rate_hz", float, "output")
         bind(self.transition.valueChanged, s, "transition_ms", float)
         bind(self.restore.toggled, s, "restore_on_stop")
+        bind(self.wow.toggled, s, "wow_effects")
+        bind(self.wow_threshold.valueChanged, s, "wow_low_health", lambda v: v / 100)
+        self.wow.toggled.connect(self.wow_threshold.setEnabled)
         bind(self.room_w.valueChanged, r, "width_m", float, "room")
         bind(self.room_d.valueChanged, r, "depth_m", float, "room")
         bind(self.tv_width.valueChanged, r, "tv_width", lambda v: v / 100, "room")

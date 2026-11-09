@@ -1,0 +1,7 @@
+## Interface: 120105, 16001, 50504, 40402, 20506, 11509
+## Title: EspSync
+## Notes: Shows your health and level-ups as a thin strip of pixels in the top-left corner, for EspSync room lighting. Output only.
+## Author: EspSync
+## Version: 1.0.0
+
+EspSync.lua

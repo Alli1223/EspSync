@@ -72,7 +72,11 @@ class MssBackend(CaptureBackend):
         raw = np.frombuffer(shot.raw, dtype=np.uint8).reshape(h, w, 4)
         step = max(1, w // TARGET_WIDTH)
         small = raw[step // 2 :: step, step // 2 :: step]
-        return Frame(image=bgra_to_linear(small), source_size=(w, h))
+        probe = None
+        if self.probe_size:
+            pw, ph = self.probe_size
+            probe = bgra_to_linear(raw[:ph, :pw])
+        return Frame(image=bgra_to_linear(small), source_size=(w, h), probe=probe)
 
     def close(self) -> None:
         if self._sct is not None:

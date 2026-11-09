@@ -145,6 +145,11 @@ class SyncSettings:
     transition_ms: float = 0.0  # ESPHome transition per update (0 = immediate)
     restore_on_stop: bool = True
 
+    # Game effects (World of Warcraft + the EspSync addon, integrations/wow).
+    # Active only while the game runs and its signal strip is on screen.
+    wow_effects: bool = True
+    wow_low_health: float = 0.35  # red pulse below this share of health
+
 
 @dataclass
 class UpdateConfig:
