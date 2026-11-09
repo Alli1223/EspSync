@@ -16,6 +16,8 @@ dependencies = [
     "numpy>=1.26",
     "mss>=9",
     "platformdirs>=4",
+    # AES-GCM for the Hue Entertainment DTLS stream (also needed by aioesphomeapi).
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +25,8 @@ gui = ["PySide6>=6.6"]
 # Linux Wayland capture (xdg-desktop-portal + PipeWire). Also needs GStreamer's
 # PipeWire plugin from the distro; see README "Platform notes".
 wayland = ["jeepney>=0.8", "PyGObject>=3.42"]
-dev = ["pytest>=8", "PySide6>=6.6", "jeepney>=0.8"]
+# python-mbedtls is only used by tests, as a reference DTLS server (wheels up to CPython 3.12).
+dev = ["pytest>=8", "PySide6>=6.6", "jeepney>=0.8", "python-mbedtls>=2.9; python_version < '3.13'"]
 
 [project.scripts]
 espsync-cli = "espsync.cli:main"
