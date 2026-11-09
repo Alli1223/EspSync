@@ -191,6 +191,7 @@ class HueChannel:
     service: str = ""  # entertainment service id; channels sharing one are segments of one light
     index: int = 0  # segment index within that light
     segments: int = 1  # channels that light has in this area
+    light_id: str = ""  # CLIP v2 light resource (for identify)
 
     @property
     def label(self) -> str:
@@ -209,10 +210,10 @@ class HueArea:
     channels: list[HueChannel] = field(default_factory=list)
 
 
-def parse_area(raw: dict[str, Any], names: dict[str, str] | None = None) -> HueArea:
+def parse_area(raw: dict[str, Any], names: dict[str, tuple[str, str]] | None = None) -> HueArea:
     """Build a HueArea from a CLIP v2 entertainment_configuration object.
 
-    `names` maps entertainment service id -> light name.
+    `names` maps entertainment service id -> (light name, light resource id).
     """
     names = names or {}
     channels = []
@@ -224,7 +225,7 @@ def parse_area(raw: dict[str, Any], names: dict[str, str] | None = None) -> HueA
         channels.append(HueChannel(
             channel_id=int(ch.get("channel_id", 0)),
             x=float(pos.get("x", 0.0)), y=float(pos.get("y", 0.0)), z=float(pos.get("z", 0.0)),
-            name=names.get(svc, ""), service=svc, index=idx,
+            name=names.get(svc, ("", ""))[0], service=svc, index=idx, light_id=names.get(svc, ("", ""))[1],
         ))
     per_service: dict[str, int] = {}
     for c in channels:
@@ -273,11 +274,21 @@ class HueApi:
             self._app_id = headers.get("hue-application-id", "")
         return self._app_id
 
-    async def light_names(self) -> dict[str, str]:
-        """entertainment service id -> name of the light (device) it belongs to."""
+    async def light_names(self) -> dict[str, tuple[str, str]]:
+        """entertainment service id -> (name of its light/device, light resource id)."""
         ents, devices = await asyncio.gather(self.get("entertainment"), self.get("device"))
         dev_names = {d.get("id", ""): (d.get("metadata") or {}).get("name", "") for d in devices}
-        return {e.get("id", ""): dev_names.get((e.get("owner") or {}).get("rid", ""), "") for e in ents}
+        return {
+            e.get("id", ""): (
+                dev_names.get((e.get("owner") or {}).get("rid", ""), ""),
+                (e.get("renderer_reference") or {}).get("rid", ""),
+            )
+            for e in ents
+        }
+
+    async def identify(self, light_id: str) -> None:
+        """Make a light blink (ignored by lights in a running entertainment stream)."""
+        await self._call("PUT", f"/clip/v2/resource/light/{light_id}", {"identify": {"action": "identify"}})
 
     async def areas(self) -> list[HueArea]:
         raw, names = await asyncio.gather(self.get("entertainment_configuration"), self.light_names())

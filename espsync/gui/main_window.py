@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from ..config import AppConfig, LightConfig, save_config
 from ..engine import SyncEngine
+from ..hue import HueApi, HueArea
 from ..lights.esphome import identify_light, probe_device
 from .devices_dialog import DevicesDialog
 from .light_panel import EntityChoice, LightPanel
@@ -62,7 +63,7 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.sync_btn)
         tb.addSeparator()
         devices = QAction("Devices…", self)
-        devices.triggered.connect(self.open_devices)
+        devices.triggered.connect(lambda: self.open_devices())
         tb.addAction(devices)
         self.status_label = QLabel()
         self.status_label.setStyleSheet("color: #aaa; padding-left: 12px;")
@@ -82,7 +83,8 @@ class MainWindow(QMainWindow):
         add_menu.addAction("Lamp / bulb", lambda: self.add_light("lamp"))
         add_menu.addAction("Addressable strip", lambda: self.add_light("strip"))
         add_menu.addSeparator()
-        add_menu.addAction("Lights from a device…", self.open_devices)
+        add_menu.addAction("Lights from an ESPHome device…", lambda: self.open_devices())
+        add_menu.addAction("Lights from a Philips Hue bridge…", lambda: self.open_devices("hue"))
         add.setMenu(add_menu)
         remove = QPushButton("Remove")
         remove.clicked.connect(self.remove_light)
@@ -106,6 +108,7 @@ class MainWindow(QMainWindow):
         self.light_panel.changed.connect(self._on_light_edited)
         self.light_panel.identifyRequested.connect(self.identify)
         self.light_panel.refreshEntitiesRequested.connect(self.fetch_entities)
+        self.light_panel.refreshHueRequested.connect(self.fetch_hue_area)
         self.settings = SettingsPanel(config)
         self.settings.changed.connect(self._on_settings)
         tabs = QTabWidget()
@@ -138,6 +141,8 @@ class MainWindow(QMainWindow):
             self.select_light(config.lights[0].id)
         for dev in config.devices:
             self.fetch_entities(dev.id, quiet=True)
+        for bridge in config.hue_bridges:
+            self.fetch_hue_area(bridge.id, quiet=True)
 
         self.engine.start(send=False)  # live preview while arranging lights
         self._ui_timer.start()
@@ -328,10 +333,11 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Could not save config: {exc}", 5000)
 
     # ------------------------------------------------------------- devices
-    def open_devices(self) -> None:
-        dlg = DevicesDialog(self.config, self)
+    def open_devices(self, tab: str = "esphome") -> None:
+        dlg = DevicesDialog(self.config, self, tab)
         dlg.devicesChanged.connect(self._on_devices_changed)
         dlg.importLights.connect(self.import_lights)
+        dlg.hueLightsImported.connect(self.add_hue_lights)
         dlg.exec()
 
     def _on_devices_changed(self) -> None:
@@ -339,8 +345,47 @@ class MainWindow(QMainWindow):
         for dev in self.config.devices:
             if dev.id not in self.light_panel.entities:
                 self.fetch_entities(dev.id, quiet=True)
+        for bridge in self.config.hue_bridges:
+            cached = self.light_panel.hue_areas.get(bridge.id)
+            if cached is None or cached.id != bridge.entertainment_id:
+                self.fetch_hue_area(bridge.id, quiet=True)
         self._schedule_restart()
         self._schedule_save()
+
+    def fetch_hue_area(self, bridge_id: str, quiet: bool = False) -> None:
+        bridge = self.config.hue_bridge(bridge_id)
+        if bridge is None or not bridge.paired or not bridge.entertainment_id:
+            if not quiet and bridge is not None:
+                QMessageBox.information(self, "Hue", f"Pair {bridge.name} and choose its entertainment area in "
+                                        "Devices → Philips Hue first.")
+            return
+        api = HueApi(bridge.host, bridge.app_key)
+        area_id = bridge.entertainment_id
+
+        def done(area: HueArea) -> None:
+            self.light_panel.set_hue_area(bridge_id, area)
+
+        def failed(err: str) -> None:
+            if not quiet:
+                QMessageBox.warning(self, "Hue", f"Could not read {bridge.name}'s entertainment area: {err}")
+            log.info("fetching Hue area from %s failed: %s", bridge.name, err)
+
+        run_async(lambda: api.area(area_id, with_names=True), done, failed)
+
+    def add_hue_lights(self, lights: list) -> None:
+        if not lights:
+            return
+        self.config.lights.extend(lights)
+        self._structure_changed()
+        self.select_light(lights[0].id)
+        bridge = self.config.hue_bridge(lights[0].hue_bridge)
+        if bridge is not None:
+            self.fetch_hue_area(bridge.id, quiet=True)
+        QMessageBox.information(
+            self, "Hue",
+            f"Added {len(lights)} Hue light(s), placed where the Hue app has them. "
+            "Drag them in the room view to fine-tune.",
+        )
 
     def fetch_entities(self, device_id: str, quiet: bool = False, then=None) -> None:  # noqa: ANN001
         dev = self.config.device(device_id)
@@ -394,6 +439,9 @@ class MainWindow(QMainWindow):
 
     def identify(self, light_id: str) -> None:
         light = self.config.light(light_id)
+        if light is not None and light.transport == "hue":
+            self._identify_hue(light)
+            return
         dev = self.config.device(light.device_id) if light else None
         if light is None or dev is None or not light.entity:
             QMessageBox.information(self, "Identify", "Choose a device and light first.")
@@ -402,6 +450,26 @@ class MainWindow(QMainWindow):
             lambda: identify_light(dev, light.entity),
             on_error=lambda e: QMessageBox.warning(self, "Identify", f"Could not flash {light.name}: {e}"),
         )
+
+    def _identify_hue(self, light: LightConfig) -> None:
+        bridge = self.config.hue_bridge(light.hue_bridge)
+        area = self.light_panel.hue_areas.get(light.hue_bridge)
+        if bridge is None or area is None or not light.hue_channels:
+            QMessageBox.information(self, "Identify", "Choose a Hue bridge and channel first.")
+            return
+        ids = {c.light_id for c in area.channels if c.channel_id in light.hue_channels and c.light_id}
+        if not ids:
+            QMessageBox.information(self, "Identify", "The bridge didn't say which light that channel is.")
+            return
+        if self.engine.sending:
+            self.statusBar().showMessage("Hue lights only blink while sync is stopped", 5000)
+        api = HueApi(bridge.host, bridge.app_key)
+
+        async def blink() -> None:
+            for lid in ids:
+                await api.identify(lid)
+
+        run_async(blink, on_error=lambda e: QMessageBox.warning(self, "Identify", f"Could not blink {light.name}: {e}"))
 
     # ---------------------------------------------------------------- ticks
     def _tick(self) -> None:
@@ -435,6 +503,7 @@ class MainWindow(QMainWindow):
                       if v != "ready" and self.config.light(k)]
             ready = sum(1 for v in st.lights.values() if v == "ready")
             parts.append(f"{ready}/{len(st.lights)} lights ready")
+            parts.extend(f"Hue {name}: {text}" for name, text in st.streams.items())
             if errors:
                 parts.append(" · ".join(errors[:3]))
         else:
