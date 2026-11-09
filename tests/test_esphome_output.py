@@ -92,6 +92,48 @@ def test_device_coming_online_later_is_picked_up():
     assert calls and calls[-1][1]["rgb"] == pytest.approx((0.0, 1.0, 0.0))
 
 
+def test_running_effect_is_switched_off_and_restored():
+    async def run():
+        dev = make_device()
+        dev.lights["lamp"] = LightInfo(object_id="lamp", key=7, name="Lamp", supported_color_modes=[35],
+                                       effects=["Rainbow", "Pulse"])
+        dev._on_state(LightState(key=7, state=True, brightness=0.8, color_mode=35, effect="Rainbow"))
+        out = ApiLightOutput(LightConfig(entity="lamp"), SyncSettings(min_brightness=0.0), dev)
+        await out.start()
+
+        def frame(rgb):
+            out._last_send = -1e9  # each frame gets its own command (no rate-limit merging)
+            out.submit(np.array([rgb], np.float32))
+
+        frame([1.0, 0.0, 0.0])
+        dev._on_state(LightState(key=7, state=True, brightness=1.0, color_mode=35, effect="None"))  # ESP echo
+        frame([0.0, 1.0, 0.0])
+        # Home Assistant switches an effect on mid-sync: switched off again.
+        dev._on_state(LightState(key=7, state=True, brightness=1.0, color_mode=35, effect="Pulse"))
+        frame([0.0, 0.0, 1.0])
+        await out.stop(restore=True)
+        return dev.client.calls
+
+    calls = asyncio.run(run())
+    first, second, third, restored = (c[1] for c in calls)
+    assert first["effect"] == "None" and first["rgb"] == pytest.approx((1.0, 0.0, 0.0))
+    assert "effect" not in second
+    assert third["effect"] == "None"
+    assert restored["effect"] == "Rainbow"  # the pre-sync effect comes back on stop
+
+
+def test_light_without_effects_gets_no_effect_field():
+    async def run():
+        dev = make_device()
+        out = ApiLightOutput(LightConfig(entity="lamp"), SyncSettings(), dev)
+        await out.start()
+        out.submit(np.array([[1.0, 0.0, 0.0]], np.float32))
+        return dev.client.calls
+
+    (_, sent), = asyncio.run(run())
+    assert "effect" not in sent
+
+
 def test_unknown_entity_reports_error():
     async def run():
         dev = make_device()

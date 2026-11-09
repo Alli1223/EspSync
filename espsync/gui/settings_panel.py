@@ -213,6 +213,12 @@ class SettingsPanel(QScrollArea):
         self.spread.setValue(round(r.horizontal_spread * 100))
         self._loading = False
 
+    def show_brightness(self) -> None:
+        """Brightness changed elsewhere (the main window's slider)."""
+        self._loading = True
+        self.brightness.setValue(round(self.config.sync.brightness * 100))
+        self._loading = False
+
     def _sync_preset(self) -> None:
         ms = self.config.sync.smoothing_ms
         idx = next((i for i, (_, v) in enumerate(SMOOTHING_PRESETS) if v == ms), len(SMOOTHING_PRESETS))

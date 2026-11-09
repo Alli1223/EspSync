@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSlider,
     QSplitter,
     QSystemTrayIcon,
     QTabWidget,
@@ -65,6 +66,20 @@ class MainWindow(QMainWindow):
         devices = QAction("Devices…", self)
         devices.triggered.connect(lambda: self.open_devices())
         tb.addAction(devices)
+        tb.addSeparator()
+        # Master brightness for every light (same value as Settings → Colour → Brightness).
+        tb.addWidget(QLabel("  ☀ "))
+        self.brightness = QSlider(Qt.Orientation.Horizontal)
+        self.brightness.setRange(0, 200)
+        self.brightness.setFixedWidth(160)
+        self.brightness.setToolTip("Brightness of all lights. Above 100% lifts dark scenes.")
+        self.brightness.setValue(round(config.sync.brightness * 100))
+        self.brightness.valueChanged.connect(self._on_brightness)
+        tb.addWidget(self.brightness)
+        self.brightness_label = QLabel()
+        self.brightness_label.setMinimumWidth(42)
+        self._show_brightness()
+        tb.addWidget(self.brightness_label)
         self.status_label = QLabel()
         self.status_label.setStyleSheet("color: #aaa; padding-left: 12px;")
         tb.addWidget(self.status_label)
@@ -317,7 +332,26 @@ class MainWindow(QMainWindow):
             self._schedule_restart()
         elif kind == "capture":
             self.engine.restart()
+        elif kind == "sync":
+            # The Settings brightness slider moved: keep the toolbar one in step.
+            value = round(self.config.sync.brightness * 100)
+            if self.brightness.value() != value:
+                self.brightness.blockSignals(True)
+                self.brightness.setValue(value)
+                self.brightness.blockSignals(False)
+                self._show_brightness()
         self._schedule_save()
+
+    def _on_brightness(self, value: int) -> None:
+        # The capture loop reads this every frame, so it applies to the next
+        # frame on every light (ESPHome and Hue) without restarting anything.
+        self.config.sync.brightness = value / 100
+        self._show_brightness()
+        self.settings.show_brightness()
+        self._schedule_save()
+
+    def _show_brightness(self) -> None:
+        self.brightness_label.setText(f"{self.brightness.value()}%")
 
     def _schedule_restart(self) -> None:
         if self.engine.sending:
