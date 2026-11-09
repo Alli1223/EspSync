@@ -14,7 +14,16 @@ TARGET_WIDTH = 160
 
 
 class CaptureError(RuntimeError):
-    """The backend cannot capture right now (retry later)."""
+    """The backend cannot capture right now.
+
+    `retry=False` means trying again on its own won't help (missing
+    dependency, the user declined or stopped screen sharing): the engine then
+    waits until the capture settings change or sync is restarted.
+    """
+
+    def __init__(self, message: str, *, retry: bool = True) -> None:
+        super().__init__(message)
+        self.retry = retry
 
 
 @dataclass
@@ -29,6 +38,8 @@ class MonitorInfo:
     hdr: bool | None = None  # None = unknown
 
     def label(self) -> str:
+        if not (self.width and self.height):  # size unknown (Wayland portal)
+            return self.name
         hdr = " HDR" if self.hdr else ""
         prim = " (primary)" if self.primary else ""
         return f"{self.index + 1}: {self.name} {self.width}x{self.height}{hdr}{prim}"

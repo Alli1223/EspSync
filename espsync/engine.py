@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import logging
+import math
 import sys
 import threading
 import time
@@ -84,6 +85,7 @@ class SyncEngine:
         self._net: _NetLoop | None = None
         self._capture_thread: threading.Thread | None = None
         self._running = threading.Event()
+        self._generation = 0  # bumped per start(); a stale capture thread sees it and exits
         self._lock = threading.Lock()
         self._regions_dirty = True
         self._colors: dict[str, np.ndarray] = {}
@@ -126,7 +128,10 @@ class SyncEngine:
             self._start_future = asyncio.run_coroutine_threadsafe(self._start_outputs(), self._net.loop)
         self._running.set()
         self._regions_dirty = True
-        self._capture_thread = threading.Thread(target=self._capture_main, name="espsync-capture", daemon=True)
+        self._generation += 1
+        self._capture_thread = threading.Thread(
+            target=self._capture_main, args=(self._generation,), name="espsync-capture", daemon=True
+        )
         self._capture_thread.start()
 
     def stop(self, restore: bool | None = None) -> None:
@@ -279,7 +284,12 @@ class SyncEngine:
         arr = np.array(regions, dtype=np.float32).reshape(-1, 4)
         return arr, plan
 
-    def _capture_main(self) -> None:
+    def _capture_main(self, generation: int) -> None:
+        def stale() -> bool:
+            # stop() only waits 3 s for this thread; it may still be blocked in a
+            # backend (e.g. the Wayland share dialog) when a new one starts.
+            return not self._running.is_set() or self._generation != generation
+
         backend: CaptureBackend | None = None
         processor = ColorProcessor(self.config.sync)
         smoother = Smoother()
@@ -295,7 +305,7 @@ class SyncEngine:
         retry_at = 0.0
 
         try:
-            while self._running.is_set():
+            while not stale():
                 s = self.config.sync
                 fps = s.target_fps if self.sending else min(s.target_fps, 20)
                 interval = 1.0 / max(5, min(fps, 240))
@@ -306,19 +316,26 @@ class SyncEngine:
                     backend.close()
                     backend = None
                 if backend is None:
-                    if tick_start < retry_at:
+                    # After a failure, wait before retrying - unless the capture
+                    # settings changed, which is worth an immediate attempt.
+                    if tick_start < retry_at and key == backend_key:
                         time.sleep(0.05)
                         continue
+                    backend_key = key
                     try:
-                        backend = create_backend(s)
-                        backend_key = key
-                        self.stats.backend = backend.name
-                        self.stats.error = None
+                        backend = create_backend(s, abort=stale)
                     except Exception as exc:  # noqa: BLE001
+                        if stale():
+                            break
                         self.stats.error = f"capture: {exc}"
                         log.warning("capture backend failed: %s", exc)
-                        retry_at = tick_start + 2.0
+                        # retry=False: the user said no / a dependency is missing.
+                        retry_at = tick_start + 2.0 if getattr(exc, "retry", True) else math.inf
                         continue
+                    if stale():
+                        break
+                    self.stats.backend = backend.name
+                    self.stats.error = None
 
                 try:
                     frame = backend.grab(timeout_ms=max(1, int(interval * 1000)))
@@ -326,7 +343,7 @@ class SyncEngine:
                     self.stats.error = f"capture: {exc}"
                     backend.close()
                     backend = None
-                    retry_at = time.perf_counter() + 1.0
+                    retry_at = time.perf_counter() + 1.0 if exc.retry else math.inf
                     continue
 
                 fresh = frame is not None

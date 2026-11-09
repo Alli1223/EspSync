@@ -114,7 +114,11 @@ class RoomConfig:
 @dataclass
 class SyncSettings:
     monitor: int = 0  # 0-based display index
-    capture_backend: Literal["auto", "dxgi", "mss"] = "auto"
+    capture_backend: Literal["auto", "dxgi", "portal", "mss"] = "auto"
+    # Wayland: token from the screen-cast portal that re-opens the screen picked
+    # last time without showing the share dialog again.  Single use; the portal
+    # backend replaces it on every start and the GUI/CLI save it.
+    portal_restore_token: str = ""
     target_fps: int = 60
     # Raise GPU scheduling priority (Windows) so capture isn't stuck behind a
     # game's queued frames.

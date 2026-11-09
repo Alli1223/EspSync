@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QLabel,
+    QPushButton,
     QScrollArea,
     QSlider,
     QSpinBox,
@@ -17,8 +18,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..capture import available_backends, list_monitors
+from ..capture import available_backends, list_monitors, resolve_backend
 from ..config import AppConfig
+
+BACKEND_LABELS = {
+    "dxgi": "DXGI (Windows, HDR, fastest)",
+    "portal": "Screen-cast portal (Wayland)",
+    "mss": "mss (X11 / portable, SDR)",
+}
 
 SMOOTHING_PRESETS = [("Instant (gaming)", 0), ("Fast", 40), ("Balanced", 80), ("Smooth (movies)", 160), ("Subtle", 320)]
 
@@ -57,7 +64,9 @@ class SettingsPanel(QScrollArea):
         self.backend = QComboBox()
         self.backend.addItem("Automatic", "auto")
         for b in available_backends():
-            self.backend.addItem({"dxgi": "DXGI (Windows, HDR, fastest)", "mss": "mss (portable, SDR)"}[b], b)
+            self.backend.addItem(BACKEND_LABELS.get(b, b), b)
+        self.repick = QPushButton("Choose screen again…")
+        self.repick.setToolTip("Forget the screen picked in the Wayland share dialog and show the dialog again")
         self.fps = QSpinBox()
         self.fps.setRange(10, 240)
         self.fps.setSuffix(" fps")
@@ -73,6 +82,8 @@ class SettingsPanel(QScrollArea):
         self.gpu_priority = QCheckBox("High GPU priority for capture (recommended while gaming)")
         f.addRow("Display", self.monitor)
         f.addRow("Backend", self.backend)
+        f.addRow("", self.repick)
+        self._capture_form = f
         f.addRow("Rate", self.fps)
         f.addRow("HDR", self.hdr)
         f.addRow("SDR white", self.sdr_white)
@@ -161,6 +172,9 @@ class SettingsPanel(QScrollArea):
             self.monitor.addItem(f"(could not list displays: {exc})", 0)
         idx = self.monitor.findData(self.config.sync.monitor)
         self.monitor.setCurrentIndex(max(idx, 0))
+        portal = resolve_backend(self.config.sync.capture_backend) == "portal"
+        self.monitor.setEnabled(not portal)  # picked in the portal's dialog instead
+        self._capture_form.setRowVisible(self.repick, portal)
         self._loading = False
 
     def load(self) -> None:
@@ -234,6 +248,7 @@ class SettingsPanel(QScrollArea):
         bind(self.spread.valueChanged, r, "horizontal_spread", lambda v: v / 100, "room")
 
         self.backend.currentIndexChanged.connect(self._on_backend)
+        self.repick.clicked.connect(self._on_repick)
         self.smoothing_preset.currentIndexChanged.connect(self._on_preset)
         self.smoothing.valueChanged.connect(lambda _: None if self._loading else self._sync_preset_silently())
 
@@ -248,6 +263,10 @@ class SettingsPanel(QScrollArea):
         self.config.sync.capture_backend = self.backend.currentData()
         self.refresh_monitors()
         self.changed.emit("sync")
+
+    def _on_repick(self) -> None:
+        self.config.sync.portal_restore_token = ""
+        self.changed.emit("capture")  # restarts capture, which shows the share dialog
 
     def _on_preset(self, idx: int) -> None:
         if self._loading or idx >= len(SMOOTHING_PRESETS):
