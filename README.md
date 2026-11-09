@@ -1,7 +1,7 @@
 # EspSync
 
 Screen-to-light sync (think Philips Hue Sync / ambilight) for **ESPHome** lights,
-on **Windows and Linux**.
+and **Philips Hue** lights alongside them, on **Windows and Linux**.
 
 * **Direct and fast.** Talks to each ESP over its own native API (the protocol
   Home Assistant uses), or over UDP for addressable strips. Home Assistant is
@@ -13,6 +13,9 @@ on **Windows and Linux**.
   and tone-mapped, instead of the clipped 8-bit image most capture tools get.
 * **Strips get per-LED colour** — e.g. a strip around the back of the TV, with
   presets for bottom/top/side edges, U-shapes and full loops.
+* **Philips Hue too**, over the Hue Entertainment API (the low-latency stream
+  Hue Sync uses), so Hue and ESPHome lights sync together. See
+  [Philips Hue](#philips-hue).
 * Live preview of what every light is sampling; letterbox detection; vivid or
   average colour modes; smoothing presets; lights restored when you stop.
 
@@ -202,6 +205,41 @@ the light back afterwards. The *LED count* must match the strip, and *Strip
 layout* says where the LEDs sit: either along a screen edge preset, or between
 two points you drag in the room.
 
+## Philips Hue
+
+EspSync streams to Hue lights with the **Entertainment API**: one encrypted UDP
+packet per frame (DTLS 1.2, ~50 a second) carries every Hue light's colour, the
+same way Hue Sync does. Ordinary REST commands would be limited to about 10 a
+second for the whole bridge.
+
+1. In the **Hue app**, create an **entertainment area** (Settings → Entertainment
+   areas) with the lights you want, placed roughly where they are.
+2. In EspSync: **Devices… → Philips Hue**. Your bridge shows up under *Found on
+   your network* (or use *Pair by IP address…*). Click **Pair selected…** and press
+   the round **link button** on the bridge.
+3. Choose the **entertainment area**, then **Add the area's lights to the room**.
+   Lights land where the Hue app has them (Hue's "front" is the screen side). A
+   gradient lightstrip becomes one light per segment, or one strip if you tick
+   *Gradient lightstrips as one strip*.
+4. **Start sync.** The status bar shows `Hue <bridge>: streaming 50 Hz`.
+
+Notes:
+
+* A bridge streams **one entertainment area at a time, for one app**. If Hue
+  Sync (or a TV, or a Sync Box) is streaming, EspSync says so and waits; it
+  picks the stream up as soon as the other app lets go.
+* When sync stops, EspSync puts the Hue lights back the way they were (the
+  bridge itself leaves them on the last streamed colour). Untick *Restore lights to
+  how they were when sync stops* in Settings to keep the last colours.
+* Each Hue light's *Output* is **Philips Hue (Entertainment)**, with the bridge
+  and the entertainment channels it drives. A lamp sends one colour to all ticked
+  channels; a strip sends one LED per channel. *Settings → Hue rate* sets the
+  packets per second (the bridge drives the lights at about 25 Hz; 50 rides
+  out lost packets).
+* The pairing key is stored in the config file, like ESPHome keys. EspSync
+  doesn't check the bridge's HTTPS certificate (Hue bridges use their own CA);
+  the stream itself is authenticated with the pairing key.
+
 ## How it works
 
 ```
@@ -215,7 +253,7 @@ two points you drag in the room.
                                                      │
                           smoothing ─► latest-value-wins per light (no queues)
                                                      │
-              ESPHome native API (TCP, Noise)  /  WLED or E1.31 UDP
+   ESPHome native API (TCP, Noise)  /  WLED or E1.31 UDP  /  Hue Entertainment (DTLS)
 ```
 
 * **Room → screen mapping.** Room `x` (left ↔ right wall) maps to screen
@@ -240,6 +278,10 @@ espsync-cli add-device --name Lamp --host lamp.local --key <key>
 espsync-cli add-light --name "Left lamp" --device Lamp --entity rgb_lamp --x -0.9 --y -0.5 --z 0.6
 espsync-cli add-light --name "TV" --kind strip --transport wled --device Strip \
     --entity tv_strip --effect WLED --leds 120 --preset "Around TV - U shape (left, top, right)"
+espsync-cli hue-pair                              # pair the Hue bridge (press its link button)
+espsync-cli hue-areas                             # entertainment areas, channels, positions
+espsync-cli hue-import "TV area"                  # stream to that area, add its lights
+espsync-cli hue-test --pattern positions          # front red / back blue, left green / right magenta
 espsync-cli monitors
 espsync-cli bench                                 # capture + processing speed
 espsync-cli run                                   # sync until Ctrl+C, prints live stats

@@ -53,7 +53,9 @@ with open(version_file, "w", encoding="utf-8") as fh:
     fh.write(str(version_info))
 
 # aioesphomeapi and zeroconf import parts of themselves dynamically (and ship
-# compiled extension modules), so collect them wholesale.
+# compiled extension modules), so collect them wholesale.  The Hue Entertainment
+# stream's DTLS (espsync.lights.dtls) only needs cryptography's AES-GCM, which
+# aioesphomeapi already uses; PyInstaller's cryptography hook bundles it.
 hidden = collect_submodules("aioesphomeapi") + collect_submodules("zeroconf") + collect_submodules("espsync")
 
 # Qt modules we never use; keeps the bundle and installer small.

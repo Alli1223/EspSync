@@ -58,6 +58,10 @@ jobs:
         run: |
           .\dist\EspSync\espsync-cli.exe --help
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          # Hue modules (REST client, DTLS on cryptography's AES-GCM) load in the
+          # bundle: with no bridge paired hue-test exits 2 after importing them.
+          .\dist\EspSync\espsync-cli.exe --config "$env:RUNNER_TEMP\smoke.json" hue-test
+          if ($LASTEXITCODE -ne 2) { throw "hue-test smoke check failed ($LASTEXITCODE)" }
           .\dist\EspSync\espsync-cli.exe --config "$env:RUNNER_TEMP\smoke.json" add-light --name Test --transport virtual
           .\dist\EspSync\espsync-cli.exe --config "$env:RUNNER_TEMP\smoke.json" show
           if ($LASTEXITCODE -ne 0) { exit 1 }
