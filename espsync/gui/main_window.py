@@ -416,6 +416,14 @@ class MainWindow(QMainWindow):
             self.screen.hdr = self.engine.stats.hdr
 
     def _tick_stats(self) -> None:
+        # The preview capture only matters while the window is on screen;
+        # don't spend CPU on it from the tray.
+        if not self.engine.sending:
+            visible = self.isVisible() and not self.isMinimized()
+            if visible and not self.engine.running:
+                self.engine.start(send=False)
+            elif not visible and self.engine.running:
+                self.engine.stop()
         st = self.engine.stats
         parts = []
         if st.backend:
