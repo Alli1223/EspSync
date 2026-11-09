@@ -18,6 +18,50 @@ on **Windows and Linux**.
 
 ## Install
 
+### Windows installer
+
+Download `EspSync-Setup-<version>.exe` from the
+[Releases page](https://github.com/Alli1223/EspSync/releases). For the latest
+build from `main`, open the newest
+[windows-installer run](https://github.com/Alli1223/EspSync/actions/workflows/windows-installer.yml)
+and download it under *Artifacts*. Run it; no Python needed.
+
+* By default it installs just for you, in `%LOCALAPPDATA%\Programs\EspSync`, with
+  no admin prompt. The wizard can install for all users instead.
+* Optional desktop shortcut, and an option to start EspSync in the tray when you sign in.
+* Installs both `EspSync.exe` (the app) and `espsync-cli.exe` (command line).
+* Upgrading: run a newer installer over the old one. Your settings in
+  `%APPDATA%\EspSync` are kept, and are also kept on uninstall.
+* The installer isn't code-signed, so SmartScreen may say "Windows protected
+  your PC": click *More info → Run anyway*.
+* The app logs to `%LOCALAPPDATA%\EspSync\Logs\espsync.log`.
+
+To publish a release, push a version tag; CI builds the installer and attaches it:
+
+```bash
+git tag v0.2.0
+```
+
+```bash
+git push origin v0.2.0
+```
+
+To build the installer locally, you need [Inno Setup 6](https://jrsoftware.org/isinfo.php):
+
+```bash
+pip install . PySide6-Essentials pyinstaller
+```
+
+```bash
+pyinstaller packaging/espsync.spec --noconfirm
+```
+
+```bash
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\installer.iss
+```
+
+### From source
+
 Python 3.11+.
 
 ```bash

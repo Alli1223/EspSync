@@ -1,0 +1,93 @@
+name: windows-installer
+
+# Builds EspSync-Setup-<version>.exe.
+# * every push to main / manual run: downloadable from the run's artifacts
+# * pushing a tag like v0.2.0: also published as a GitHub Release
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed to create the release on tags
+
+concurrency:
+  group: windows-installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Work out the version
+        id: version
+        shell: pwsh
+        run: |
+          $base = (Select-String -Path espsync/__init__.py -Pattern '__version__ = "(.+)"').Matches[0].Groups[1].Value
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $v = "${{ github.ref_name }}".TrimStart("v")
+          } else {
+            $v = "$base.${{ github.run_number }}"
+          }
+          # Windows version resources need plain numbers (e.g. 0.2.0 from v0.2.0-beta1).
+          $num = (([regex]::Matches($v, '\d+') | Select-Object -First 4 | ForEach-Object Value) -join '.')
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "numeric=$num" >> $env:GITHUB_OUTPUT
+          Write-Host "Building $v ($num)"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . "PySide6-Essentials>=6.6" "pyinstaller>=6.10"
+
+      - name: Build the app (PyInstaller)
+        env:
+          ESPSYNC_VERSION: ${{ steps.version.outputs.numeric }}
+        run: pyinstaller packaging/espsync.spec --noconfirm --clean
+
+      - name: Smoke test the bundle
+        shell: pwsh
+        run: |
+          .\dist\EspSync\espsync-cli.exe --help
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          .\dist\EspSync\espsync-cli.exe --config "$env:RUNNER_TEMP\smoke.json" add-light --name Test --transport virtual
+          .\dist\EspSync\espsync-cli.exe --config "$env:RUNNER_TEMP\smoke.json" show
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (-not (Test-Path .\dist\EspSync\EspSync.exe)) { throw "EspSync.exe missing" }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
+
+      - name: Build the installer (Inno Setup)
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+            "/DMyAppVersion=${{ steps.version.outputs.version }}" `
+            "/DMyNumericVersion=${{ steps.version.outputs.numeric }}" `
+            packaging\installer.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem dist\EspSync-Setup-*.exe | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EspSync-Setup-${{ steps.version.outputs.version }}
+          path: dist/EspSync-Setup-*.exe
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/EspSync-Setup-*.exe
+          generate_release_notes: true
