@@ -215,6 +215,7 @@ class FakeApi:
         self.lights = {lid: {"id": lid, "on": {"on": True}, "dimming": {"brightness": 40.0},
                              "color": {"xy": {"x": 0.3, "y": 0.3}}} for lid in area.light_ids}
         self.snapshots = 0
+        self.others: list[HueArea] = []  # other areas on the bridge
         self.puts: list[tuple[str, dict]] = []
         self.log: list[str] = []
 
@@ -231,6 +232,9 @@ class FakeApi:
 
     async def area(self, area_id: str, with_names: bool = False) -> HueArea:
         return self._area
+
+    async def areas(self, with_names: bool = True) -> list[HueArea]:
+        return [self._area, *self.others]
 
     async def set_streaming(self, area_id: str, active: bool) -> None:
         self.log.append(f"streaming {active}")
@@ -357,6 +361,33 @@ def test_stream_refuses_area_held_by_another_app():
         assert "another app" in out.status_text()
         await stream.stop()
         assert api.streaming_calls == []  # we never started it, so we don't stop it
+
+    asyncio.run(main())
+
+
+def test_stream_refuses_while_another_area_is_streamed_by_another_app():
+    async def main():
+        api = FakeApi(_area())
+        api.others = [HueArea(id="other", name="Music area", status="active", streamer="hue-sync")]
+        stream, transports = _stream(api)
+        stream.start()
+        assert not await stream.wait_ready(0.3)
+        assert "'Music area' is in use by another app" in stream.error
+        assert api.streaming_calls == [] and transports == []
+        await stream.stop()
+
+    asyncio.run(main())
+
+
+def test_stream_refuses_unknown_area():
+    async def main():
+        api = FakeApi(_area())
+        api._area = HueArea(id="something-else", name="x")
+        stream, _ = _stream(api)
+        stream.start()
+        assert not await stream.wait_ready(0.3)
+        assert "not found" in stream.error
+        await stream.stop()
 
     asyncio.run(main())
 

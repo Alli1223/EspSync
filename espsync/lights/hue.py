@@ -204,10 +204,16 @@ class HueEntertainmentStream:
         if self.status != "error":
             self.status = "connecting"
         app_id = await self.api.application_id()
-        area = await self.api.area(b.entertainment_id)
+        areas = await self.api.areas(with_names=False)
+        area = next((a for a in areas if a.id == b.entertainment_id), None)
+        if area is None:
+            raise HueError("entertainment area not found (deleted in the Hue app?)")
         self.area = area
-        if area.status == "active" and area.streamer and app_id and area.streamer != app_id:
-            raise HueError(f"'{area.name}' is in use by another app (Hue Sync?): stop it there first")
+        # A bridge streams one area at a time: never start ours over another
+        # app's stream (the bridge would hand the lights to us mid-session).
+        busy = next((a for a in areas if a.status == "active" and a.streamer and a.streamer != app_id), None)
+        if busy is not None:
+            raise HueError(f"'{busy.name}' is in use by another app (Hue Sync?): stop it there first")
         if self._snapshot is None:
             try:
                 self._snapshot = await self.api.light_states(area.light_ids)

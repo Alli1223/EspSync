@@ -319,8 +319,11 @@ class HueApi:
         """Make a light blink (ignored by lights in a running entertainment stream)."""
         await self._call("PUT", f"/clip/v2/resource/light/{light_id}", {"identify": {"action": "identify"}})
 
-    async def areas(self) -> list[HueArea]:
-        raw, names = await asyncio.gather(self.get("entertainment_configuration"), self.light_names())
+    async def areas(self, with_names: bool = True) -> list[HueArea]:
+        if with_names:
+            raw, names = await asyncio.gather(self.get("entertainment_configuration"), self.light_names())
+        else:
+            raw, names = await self.get("entertainment_configuration"), None
         return sorted((parse_area(a, names) for a in raw), key=lambda a: a.name.lower())
 
     async def area(self, area_id: str, with_names: bool = False) -> HueArea:
