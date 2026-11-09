@@ -99,6 +99,8 @@ class SyncEngine:
         self._deliver_pending = False
         self._latest: dict[str, np.ndarray] = {}
         self._latest_stamp = 0.0
+        self._start_future = None
+        self.sending = False
 
     # ------------------------------------------------------------------ public
     @property
@@ -109,14 +111,19 @@ class SyncEngine:
         """Light positions/regions changed: recompute sample regions next frame."""
         self._regions_dirty = True
 
-    def start(self) -> None:
+    def start(self, send: bool = True) -> None:
+        """Start capturing.  With send=False nothing is sent to lights (preview
+        mode: colours are still computed for the GUI, at a lower frame rate)."""
         if self.running:
             return
+        self.sending = send
         self.stats = EngineStats(running=True)
         if self._net is None:
             self._net = _NetLoop()
-        _set_timer_resolution(True)
-        self._net.run(self._start_outputs(), timeout=60)
+        if send:
+            _set_timer_resolution(True)
+            # Devices connect in the background; lights join as they become ready.
+            self._start_future = asyncio.run_coroutine_threadsafe(self._start_outputs(), self._net.loop)
         self._running.set()
         self._regions_dirty = True
         self._capture_thread = threading.Thread(target=self._capture_main, name="espsync-capture", daemon=True)
@@ -129,13 +136,19 @@ class SyncEngine:
         if self._capture_thread is not None:
             self._capture_thread.join(timeout=3)
             self._capture_thread = None
-        restore = self.config.sync.restore_on_stop if restore is None else restore
-        if self._net is not None:
+        if self.sending and self._net is not None:
+            restore = self.config.sync.restore_on_stop if restore is None else restore
+            try:
+                if self._start_future is not None:
+                    self._start_future.result(timeout=20)
+            except Exception:  # noqa: BLE001
+                log.exception("error while starting outputs")
             try:
                 self._net.run(self._stop_outputs(restore), timeout=15)
             except Exception:  # noqa: BLE001
                 log.exception("error while stopping outputs")
-        _set_timer_resolution(False)
+            _set_timer_resolution(False)
+        self._start_future = None
         self.stats.running = False
 
     def shutdown(self) -> None:
@@ -146,8 +159,9 @@ class SyncEngine:
 
     def restart(self) -> None:
         if self.running:
+            send = self.sending
             self.stop(restore=False)
-            self.start()
+            self.start(send=send)
 
     def colors(self) -> dict[str, np.ndarray]:
         with self._lock:
@@ -160,7 +174,7 @@ class SyncEngine:
 
     def light_status(self) -> dict[str, str]:
         out = {}
-        for lid, o in self._outputs.items():
+        for lid, o in list(self._outputs.items()):
             out[lid] = o.status if not o.error else f"{o.status}: {o.error}"
         return out
 
@@ -284,7 +298,8 @@ class SyncEngine:
         try:
             while self._running.is_set():
                 s = self.config.sync
-                interval = 1.0 / max(5, min(s.target_fps, 240))
+                fps = s.target_fps if self.sending else min(s.target_fps, 20)
+                interval = 1.0 / max(5, min(fps, 240))
                 tick_start = time.perf_counter()
 
                 key = (s.capture_backend, s.monitor, s.hdr, s.sdr_white_nits, s.hdr_peak_nits)
@@ -354,7 +369,7 @@ class SyncEngine:
                     self._colors = out
                 self._latest = out
                 self._latest_stamp = frame.timestamp if fresh and frame is not None else now
-                if not self._deliver_pending and self._net is not None:
+                if self.sending and not self._deliver_pending and self._net is not None:
                     self._deliver_pending = True
                     self._net.loop.call_soon_threadsafe(self._deliver)
 

@@ -284,6 +284,27 @@ class EffectController:
             self.device.client.light_command(self.info.key, effect="None", device_id=self.info.device_id)
 
 
+async def identify_light(cfg: DeviceConfig, entity: str, timeout: float = 8.0) -> None:
+    """Flash a light so the user can tell which one it is."""
+    client = APIClient(
+        cfg.host, cfg.port, cfg.password or None, client_info=CLIENT_INFO,
+        noise_psk=cfg.encryption_key or None,
+    )
+    await asyncio.wait_for(client.connect(login=True), timeout)
+    try:
+        entities, _ = await client.list_entities_services()
+        info = next(
+            (e for e in entities if isinstance(e, LightInfo) and entity in (e.object_id, str(e.key), e.name)),
+            None,
+        )
+        if info is None:
+            raise LookupError(f"light '{entity}' not found")
+        client.light_command(info.key, state=True, flash_length=1.5, brightness=1.0, device_id=info.device_id)
+        await asyncio.sleep(0.2)
+    finally:
+        await client.disconnect()
+
+
 async def probe_device(cfg: DeviceConfig, timeout: float = 8.0) -> tuple[str, list[LightInfo]]:
     """Connect once and list the device's lights (used by the 'add device' UI)."""
     client = APIClient(
