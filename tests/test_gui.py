@@ -7,18 +7,12 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QPoint, QPointF, Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from espsync.config import AppConfig, LightConfig  # noqa: E402
 from espsync.gui.light_panel import LightPanel  # noqa: E402
 from espsync.gui.room_view import LampItem, RoomView, StripItem  # noqa: E402
 from espsync.gui.screen_view import ScreenView  # noqa: E402
 from espsync.mapping import light_regions  # noqa: E402
-
-
-@pytest.fixture(scope="module")
-def app():
-    return QApplication.instance() or QApplication([])
 
 
 def test_room_drag_updates_config_and_clamps(app):

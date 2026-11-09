@@ -6,7 +6,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
 from PySide6.QtTest import QTest  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from espsync.config import AppConfig  # noqa: E402
 from espsync.gui.settings_panel import SettingsPanel  # noqa: E402
@@ -15,11 +14,6 @@ from espsync.updater import UpdateInfo  # noqa: E402
 
 INFO = UpdateInfo("9.0.0", "v9.0.0", "**New** stuff", "https://example.invalid", "EspSync-Setup-9.0.0.exe",
                   "https://github.com/x", 10, "ab" * 32)
-
-
-@pytest.fixture(scope="module")
-def app():
-    return QApplication.instance() or QApplication([])
 
 
 def test_countdown_starts_install(app):
