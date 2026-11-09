@@ -85,6 +85,24 @@ api:
   RTX 3070 under load, this cut the capture wait from ~30 ms (p95 ~140 ms) to
   ~10 ms (p95 ~20 ms).
 
+### Keep Home Assistant's database small
+
+The ESP reports every colour change back to all connected clients, Home
+Assistant included. At 30 updates a second, HA's recorder would store thousands
+of state rows per minute for each synced light, so exclude those lights:
+
+```yaml
+# Home Assistant configuration.yaml
+recorder:
+  exclude:
+    entities:
+      - light.living_room_lamp
+      - light.tv_backlight
+```
+
+Strips driven over UDP (below) don't have this problem: while the effect runs,
+the light's state doesn't change.
+
 ### Addressable strips (per-LED, UDP)
 
 For strips, UDP realtime protocols skip the API entirely. Each frame is a single

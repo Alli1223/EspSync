@@ -46,7 +46,11 @@ def cmd_lights(args: argparse.Namespace) -> int:
     from .lights import probe_device
 
     dev = DeviceConfig(host=args.host, port=args.port, encryption_key=args.key or "", password=args.password or "")
-    name, lights = asyncio.run(probe_device(dev))
+    try:
+        name, lights = asyncio.run(probe_device(dev))
+    except ConnectionError as exc:
+        print(f"{args.host}: {exc}", file=sys.stderr)
+        return 1
     print(f"{name}:")
     if not lights:
         print("  (no lights)")

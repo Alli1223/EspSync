@@ -138,11 +138,10 @@ class SyncEngine:
             self._capture_thread = None
         if self.sending and self._net is not None:
             restore = self.config.sync.restore_on_stop if restore is None else restore
-            try:
-                if self._start_future is not None:
-                    self._start_future.result(timeout=20)
-            except Exception:  # noqa: BLE001
-                log.exception("error while starting outputs")
+            # Don't wait for devices that are still connecting (could be 10 s
+            # for an offline one): cancel; _stop_outputs tidies up what exists.
+            if self._start_future is not None and not self._start_future.done():
+                self._start_future.cancel()
             try:
                 self._net.run(self._stop_outputs(restore), timeout=15)
             except Exception:  # noqa: BLE001
@@ -175,7 +174,7 @@ class SyncEngine:
     def light_status(self) -> dict[str, str]:
         out = {}
         for lid, o in list(self._outputs.items()):
-            out[lid] = o.status if not o.error else f"{o.status}: {o.error}"
+            out[lid] = o.status_text()
         return out
 
     # ----------------------------------------------------------- network side

@@ -35,6 +35,9 @@ class LightOutput(ABC):
     def ready(self) -> bool:
         return self.status == "ready"
 
+    def status_text(self) -> str:
+        return f"{self.status}: {self.error}" if self.error else self.status
+
     async def start(self) -> None:
         self.status = "ready"
 

@@ -31,6 +31,33 @@ log = logging.getLogger(__name__)
 CLIENT_INFO = "EspSync"
 
 
+def friendly_error(exc: BaseException) -> str:
+    """Turn aioesphomeapi exceptions into something a user can act on."""
+    from aioesphomeapi.core import (
+        EncryptionPlaintextAPIError,
+        InvalidAuthAPIError,
+        InvalidEncryptionKeyAPIError,
+        RequiresEncryptionAPIError,
+        ResolveAPIError,
+        SocketAPIError,
+        TimeoutAPIError,
+    )
+
+    if isinstance(exc, RequiresEncryptionAPIError):
+        return "the device uses encryption: enter its API encryption key"
+    if isinstance(exc, InvalidEncryptionKeyAPIError):
+        return "wrong API encryption key"
+    if isinstance(exc, EncryptionPlaintextAPIError):
+        return "the device has no encryption: clear the encryption key"
+    if isinstance(exc, InvalidAuthAPIError):
+        return "wrong API password"
+    if isinstance(exc, ResolveAPIError):
+        return "could not resolve the host name (try the IP address)"
+    if isinstance(exc, (SocketAPIError, TimeoutAPIError, TimeoutError, OSError)):
+        return f"could not reach the device ({exc})" if str(exc) else "could not reach the device"
+    return str(exc) or type(exc).__name__
+
+
 class EspHomeDevice:
     """One connection per ESP; shared by all lights on that device."""
 
@@ -46,6 +73,12 @@ class EspHomeDevice:
         )
         self.lights: dict[str, LightInfo] = {}
         self.states: dict[int, LightState] = {}
+        # First state seen per light this session = how it was before we touched
+        # it.  ESPHome sends all states right after subscribe, before it handles
+        # any command of ours, so this is always the pre-sync state (and a
+        # reconnect mid-sync doesn't overwrite it).
+        self.initial_states: dict[int, LightState] = {}
+        self._state_waiters: dict[int, asyncio.Event] = {}
         self.connected = asyncio.Event()
         self.error: str | None = None
         self._reconnect: ReconnectLogic | None = None
@@ -72,12 +105,26 @@ class EspHomeDevice:
             log.warning("Lost connection to %s", self.cfg.name or self.cfg.host)
 
     async def _on_connect_error(self, err: Exception) -> None:
-        self.error = str(err) or type(err).__name__
+        self.error = friendly_error(err)
         log.warning("Connecting to %s failed: %s", self.cfg.name or self.cfg.host, self.error)
 
     def _on_state(self, state: Any) -> None:
         if isinstance(state, LightState):
             self.states[state.key] = state
+            if state.key not in self.initial_states:
+                self.initial_states[state.key] = state
+                waiter = self._state_waiters.pop(state.key, None)
+                if waiter is not None:
+                    waiter.set()
+
+    async def wait_initial_state(self, key: int, timeout: float) -> LightState | None:
+        if key not in self.initial_states:
+            waiter = self._state_waiters.setdefault(key, asyncio.Event())
+            try:
+                await asyncio.wait_for(waiter.wait(), timeout)
+            except TimeoutError:
+                pass
+        return self.initial_states.get(key)
 
     async def start(self) -> None:
         host = self.cfg.host
@@ -147,29 +194,43 @@ class ApiLightOutput(LightOutput):
         self.device = device
         self.info: LightInfo | None = None
         self.mode: int | None = None
-        self._saved: LightState | None = None
         self._is_off = False
         self._last_hue = (1.0, 1.0, 1.0)
 
-    async def start(self) -> None:
-        self.status = "connecting"
-        if not await self.device.wait_connected(10.0):
-            self.status = "error"
-            self.error = self.device.error or "device not reachable"
-            return
+    def _resolve(self) -> bool:
         info = self.device.find_light(self.cfg.entity)
         if info is None:
             self.status = "error"
             self.error = f"light '{self.cfg.entity}' not found on {self.device.cfg.name}"
-            return
+            return False
         self.info = info
         self.mode = pick_rgb_mode(info)
-        self._saved = self.device.states.get(info.key)
         self.status = "ready"
+        self.error = None
+        return True
+
+    async def start(self) -> None:
+        self.status = "connecting"
+        # If the device is offline we stay "connecting"; `ready` picks the
+        # light up as soon as the device's reconnect logic gets through.
+        if await self.device.wait_connected(10.0) and self._resolve():
+            assert self.info is not None
+            await self.device.wait_initial_state(self.info.key, 1.5)
 
     @property
     def ready(self) -> bool:
-        return self.status == "ready" and self.device.is_connected
+        if not self.device.is_connected:
+            return False
+        if self.status == "connecting" and self.info is None:
+            return self._resolve()
+        return self.status == "ready"
+
+    def status_text(self) -> str:
+        if self.status == "ready" and not self.device.is_connected:
+            return "reconnecting"
+        if self.status == "connecting" and self.device.error:
+            return f"connecting: {self.device.error}"
+        return super().status_text()
 
     def encode(self, colors: np.ndarray) -> bytes:
         rgb = np.clip(colors[0], 0.0, 1.0)
@@ -213,9 +274,12 @@ class ApiLightOutput(LightOutput):
 
     async def stop(self, restore: bool) -> None:
         await super().stop(restore)
-        if restore and self.info is not None and self._saved is not None and self.device.is_connected:
+        if not restore or self.info is None or not self.device.is_connected:
+            return
+        saved = self.device.initial_states.get(self.info.key)
+        if saved is not None:
             try:
-                restore_light(self.device.client, self.info, self._saved)
+                restore_light(self.device.client, self.info, saved)
             except APIConnectionError:
                 pass
 
@@ -256,7 +320,6 @@ class EffectController:
         self.entity = entity
         self.effect = effect
         self.info: LightInfo | None = None
-        self._saved: LightState | None = None
 
     async def start(self) -> str | None:
         if not await self.device.wait_connected(10.0):
@@ -268,7 +331,7 @@ class EffectController:
         if match is None:
             return f"effect '{self.effect}' not configured (available: {', '.join(info.effects) or 'none'})"
         self.info = info
-        self._saved = self.device.states.get(info.key)
+        await self.device.wait_initial_state(info.key, 1.5)
         self.device.client.light_command(
             info.key, state=True, brightness=1.0, effect=match, transition_length=0.0,
             device_id=info.device_id,
@@ -278,8 +341,9 @@ class EffectController:
     async def stop(self, restore: bool) -> None:
         if self.info is None or not self.device.is_connected:
             return
-        if restore and self._saved is not None:
-            restore_light(self.device.client, self.info, self._saved)
+        saved = self.device.initial_states.get(self.info.key)
+        if restore and saved is not None:
+            restore_light(self.device.client, self.info, saved)
         else:
             self.device.client.light_command(self.info.key, effect="None", device_id=self.info.device_id)
 
@@ -290,7 +354,10 @@ async def identify_light(cfg: DeviceConfig, entity: str, timeout: float = 8.0) -
         cfg.host, cfg.port, cfg.password or None, client_info=CLIENT_INFO,
         noise_psk=cfg.encryption_key or None,
     )
-    await asyncio.wait_for(client.connect(login=True), timeout)
+    try:
+        await asyncio.wait_for(client.connect(login=True), timeout)
+    except Exception as exc:
+        raise ConnectionError(friendly_error(exc)) from exc
     try:
         entities, _ = await client.list_entities_services()
         info = next(
@@ -311,7 +378,10 @@ async def probe_device(cfg: DeviceConfig, timeout: float = 8.0) -> tuple[str, li
         cfg.host, cfg.port, cfg.password or None, client_info=CLIENT_INFO,
         noise_psk=cfg.encryption_key or None,
     )
-    await asyncio.wait_for(client.connect(login=True), timeout)
+    try:
+        await asyncio.wait_for(client.connect(login=True), timeout)
+    except Exception as exc:
+        raise ConnectionError(friendly_error(exc)) from exc
     try:
         info = await client.device_info()
         entities, _ = await client.list_entities_services()

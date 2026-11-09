@@ -106,8 +106,7 @@ class DeviceEditDialog(QDialog):
 
         def failed(err: str) -> None:
             self.test_btn.setEnabled(True)
-            hint = " (check the encryption key)" if "noise" in err.lower() or "handshake" in err.lower() else ""
-            self.status.setText(f"✘ {err}{hint}")
+            self.status.setText(f"✘ {err}")
 
         run_async(lambda: probe_device(cfg), done, failed)
 
