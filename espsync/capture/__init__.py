@@ -64,6 +64,7 @@ def create_backend(settings: SyncSettings) -> CaptureBackend:
                 hdr_mode=settings.hdr,
                 sdr_white_override=settings.sdr_white_nits,
                 peak_override=settings.hdr_peak_nits,
+                gpu_priority=settings.gpu_priority,
             )
         except Exception:
             if settings.capture_backend == "dxgi":

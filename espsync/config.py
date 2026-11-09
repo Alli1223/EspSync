@@ -116,6 +116,9 @@ class SyncSettings:
     monitor: int = 0  # 0-based display index
     capture_backend: Literal["auto", "dxgi", "mss"] = "auto"
     target_fps: int = 60
+    # Raise GPU scheduling priority (Windows) so capture isn't stuck behind a
+    # game's queued frames.
+    gpu_priority: bool = True
 
     # Colour processing
     mode: Literal["average", "vivid"] = "vivid"

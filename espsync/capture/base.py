@@ -47,6 +47,7 @@ class Frame:
     hdr: bool = False
     peak: float = 1.0
     timestamp: float = field(default_factory=time.perf_counter)
+    mapped: bool = False  # set once tone mapping/clipping has been applied in place
 
     @property
     def aspect(self) -> float:

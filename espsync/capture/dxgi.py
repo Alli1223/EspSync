@@ -274,6 +274,37 @@ _d3d11.D3D11CreateDevice.argtypes = [
 _d3d11.D3D11CreateDevice.restype = HRESULT
 
 
+_gpu_priority_set = False
+
+
+def raise_gpu_priority() -> int | None:
+    """Ask the GPU scheduler to run our (tiny) copy/mip work ahead of a game.
+
+    Without this, while a game keeps the GPU busy our readback waits behind
+    its queued frames: measured 30 ms median / 140 ms p95 on an RTX 3070,
+    versus ~10 / 20 ms with REALTIME priority.  OBS does the same.  Returns
+    the class that was applied (5 realtime, 4 high) or None.
+    """
+    global _gpu_priority_set
+    if _gpu_priority_set:
+        return None
+    try:
+        gdi32 = ctypes.WinDLL("gdi32")
+        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32.GetCurrentProcess.restype = c_void_p
+        fn = gdi32.D3DKMTSetProcessSchedulingPriorityClass
+        fn.argtypes = [c_void_p, ctypes.c_int]
+        fn.restype = ctypes.c_long
+    except (OSError, AttributeError):
+        return None
+    for cls in (5, 4):  # D3DKMT_SCHEDULINGPRIORITYCLASS_REALTIME, _HIGH
+        if fn(kernel32.GetCurrentProcess(), cls) == 0:
+            _gpu_priority_set = True
+            log.info("GPU scheduling priority class set to %s", "realtime" if cls == 5 else "high")
+            return cls
+    return None
+
+
 def _ensure_dpi_awareness() -> None:
     # DuplicateOutput1 requires a per-monitor DPI aware process.  Qt already
     # sets this; for the CLI we do it here.  Failure (already set) is harmless.
@@ -414,9 +445,12 @@ class DxgiBackend(CaptureBackend):
         sdr_white_override: float = 0.0,
         peak_override: float = 0.0,
         target_width: int = TARGET_WIDTH,
+        gpu_priority: bool = True,
     ) -> None:
         super().__init__(monitor)
         _ensure_dpi_awareness()
+        if gpu_priority:
+            raise_gpu_priority()
         self.hdr_mode = hdr_mode
         self.sdr_white_override = sdr_white_override
         self.peak_override = peak_override
@@ -576,6 +610,7 @@ class DxgiBackend(CaptureBackend):
             return None
         _check(hr, "AcquireNextFrame")
         self._holding = True
+        acquired = time.perf_counter()
         resource = Com(res.value)
         try:
             if info.LastPresentTime == 0 and self._have_frame:
@@ -584,13 +619,13 @@ class DxgiBackend(CaptureBackend):
             if tex is None:
                 raise CaptureError("frame is not a texture")
             try:
-                return self._read(tex)
+                return self._read(tex, acquired)
             finally:
                 tex.release()
         finally:
             resource.release()
 
-    def _read(self, frame_tex: Com) -> Frame:
+    def _read(self, frame_tex: Com, acquired: float) -> Frame:
         assert self._ctx is not None and self._out is not None
         desc = D3D11_TEXTURE2D_DESC()
         frame_tex.void(10, (POINTER(D3D11_TEXTURE2D_DESC),), byref(desc))
@@ -649,7 +684,9 @@ class DxgiBackend(CaptureBackend):
         self.hdr_active = hdr
         self._have_frame = True
         w, h = self._out.rect[2], self._out.rect[3]
-        return Frame(image=np.ascontiguousarray(image), source_size=(w, h), hdr=hdr, peak=peak)
+        return Frame(
+            image=np.ascontiguousarray(image), source_size=(w, h), hdr=hdr, peak=peak, timestamp=acquired
+        )
 
     # -- teardown ---------------------------------------------------------------
     @property

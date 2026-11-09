@@ -43,16 +43,20 @@ def tonemap(img: np.ndarray, peak: float, knee: float = 0.85) -> np.ndarray:
     if peak <= 1.0 + 1e-3:
         np.clip(img, 0.0, 1.0, out=img)
         return img
-    m = img.max(axis=2)
-    over = m > knee
-    if not over.any():
+    m = channel_max(img)
+    if float(m.max()) <= knee:
         return img
     c = (1.0 - knee) / (peak - 1.0)
-    mo = m[over]
-    x = np.clip((mo - knee) / (peak - knee), 0.0, 1.0)
+    x = np.clip((m - knee) / (peak - knee), 0.0, 1.0)
     f = knee + (1.0 - knee) * (x * (1.0 + c) / (x + c))
-    img[over] *= (f / mo)[:, None]
+    scale = np.where(m > knee, f / np.maximum(m, 1e-9), 1.0).astype(np.float32)
+    img *= scale[..., None]
     return img
+
+
+def channel_max(img: np.ndarray) -> np.ndarray:
+    """Per-pixel max over RGB (much faster than img.max(axis=2) for 3 channels)."""
+    return np.maximum(np.maximum(img[..., 0], img[..., 1]), img[..., 2])
 
 
 def saturate(enc: np.ndarray, amount: float) -> np.ndarray:
@@ -93,9 +97,11 @@ class LetterboxDetector:
         bar = min(start, end) / n  # symmetric: subtitles in the lower bar don't break it
         return bar if bar >= 0.02 else 0.0
 
-    def update(self, img: np.ndarray, now: float | None = None) -> tuple[float, float]:
+    def update(
+        self, img: np.ndarray, now: float | None = None, mx: np.ndarray | None = None
+    ) -> tuple[float, float]:
         now = time.monotonic() if now is None else now
-        bright = img.max(axis=2) > self.threshold
+        bright = (channel_max(img) if mx is None else mx) > self.threshold
         v = self._bar(bright.any(axis=1))
         h = self._bar(bright.any(axis=0))
         if v is None or h is None:  # all-black frame: keep the current crop
@@ -121,61 +127,78 @@ class LetterboxDetector:
 # ---------------------------------------------------------------- region means
 
 
+class IntegralImage:
+    """Summed-area table of a frame; region means in O(1) per region.
+
+    Built once per captured frame (planar float32, 3 channels for plain
+    averaging, 5 for vivid), then any number of regions can be looked up -
+    hundreds of LED regions cost about the same as one.
+    """
+
+    def __init__(self, img: np.ndarray, vivid: bool, mx: np.ndarray | None = None) -> None:
+        h, w = img.shape[:2]
+        self.h, self.w, self.vivid = h, w, vivid
+        planar = img.transpose(2, 0, 1)
+        if vivid:
+            mx = channel_max(img) if mx is None else mx
+            mn = np.minimum(np.minimum(img[..., 0], img[..., 1]), img[..., 2])
+            sat = (mx - mn) / np.maximum(mx, 1e-6)
+            weight = 0.05 + sat * np.sqrt(np.minimum(mx, 1.0))
+            stack = np.empty((5, h, w), np.float32)
+            np.multiply(planar, weight, out=stack[:3])
+            stack[3] = weight
+            stack[4] = mx
+        else:
+            stack = np.ascontiguousarray(planar, dtype=np.float32)
+        table = np.zeros((stack.shape[0], h + 1, w + 1), np.float32)
+        cs = np.cumsum(stack, axis=2)
+        np.cumsum(cs, axis=1, out=table[:, 1:, 1:])
+        self.table = table
+
+    def means(self, regions: np.ndarray, bars: tuple[float, float] = (0.0, 0.0)) -> np.ndarray:
+        """Mean linear colour of each region -> (N, 3).
+
+        `regions` is (N, 4) [u0, v0, u1, v1] relative to the *active picture*
+        (inside any detected black bars).
+        """
+        if regions.size == 0:
+            return np.zeros((0, 3), np.float32)
+        h, w = self.h, self.w
+        bv, bh = bars
+        r_lo, r_hi = bv * h, h - bv * h
+        c_lo, c_hi = bh * w, w - bh * w
+        c0 = np.clip(np.floor(c_lo + regions[:, 0] * (c_hi - c_lo)).astype(np.intp), 0, w - 1)
+        r0 = np.clip(np.floor(r_lo + regions[:, 1] * (r_hi - r_lo)).astype(np.intp), 0, h - 1)
+        c1 = np.ceil(c_lo + regions[:, 2] * (c_hi - c_lo)).astype(np.intp)
+        r1 = np.ceil(r_lo + regions[:, 3] * (r_hi - r_lo)).astype(np.intp)
+        c1 = np.clip(np.maximum(c1, c0 + 1), 1, w)
+        r1 = np.clip(np.maximum(r1, r0 + 1), 1, h)
+
+        t = self.table
+        sums = (t[:, r1, c1] - t[:, r0, c1] - t[:, r1, c0] + t[:, r0, c0]).astype(np.float64)
+        area = ((r1 - r0) * (c1 - c0)).astype(np.float64)
+        if not self.vivid:
+            return (sums / area).T.astype(np.float32)
+
+        weighted = (sums[:3] / np.maximum(sums[3], 1e-9)).T
+        v_plain = sums[4] / area  # mean brightness of the region
+        v_weighted = weighted.max(axis=1)
+        # Hue/saturation from the saturation-weighted mean; brightness between
+        # the two so a small saturated object on a dark background shows its
+        # colour without blasting the light to full brightness.
+        v = np.sqrt(np.maximum(v_plain * v_weighted, 0.0))
+        scale = np.where(v_weighted > 1e-9, v / np.maximum(v_weighted, 1e-9), 0.0)
+        return np.clip(weighted * scale[:, None], 0.0, None).astype(np.float32)
+
+
 def region_means(
     img: np.ndarray,
     regions: np.ndarray,
     bars: tuple[float, float] = (0.0, 0.0),
     vivid: bool = False,
 ) -> np.ndarray:
-    """Mean linear colour of each region -> (N, 3).
-
-    `regions` is (N, 4) [u0, v0, u1, v1] in the *active picture* (inside any
-    detected black bars).  Uses summed-area tables, so cost is independent of
-    region size and hundreds of LED regions are cheap.
-    """
-    h, w = img.shape[:2]
-    if regions.size == 0:
-        return np.zeros((0, 3), np.float32)
-    bv, bh = bars
-    r_lo, r_hi = bv * h, h - bv * h
-    c_lo, c_hi = bh * w, w - bh * w
-
-    c0 = np.floor(c_lo + regions[:, 0] * (c_hi - c_lo)).astype(np.int64)
-    c1 = np.ceil(c_lo + regions[:, 2] * (c_hi - c_lo)).astype(np.int64)
-    r0 = np.floor(r_lo + regions[:, 1] * (r_hi - r_lo)).astype(np.int64)
-    r1 = np.ceil(r_lo + regions[:, 3] * (r_hi - r_lo)).astype(np.int64)
-    c0 = np.clip(c0, 0, w - 1)
-    r0 = np.clip(r0, 0, h - 1)
-    c1 = np.clip(np.maximum(c1, c0 + 1), 1, w)
-    r1 = np.clip(np.maximum(r1, r0 + 1), 1, h)
-
-    if vivid:
-        mx = img.max(axis=2)
-        mn = img.min(axis=2)
-        sat = np.where(mx > 1e-6, (mx - mn) / np.maximum(mx, 1e-6), 0.0)
-        weight = (0.05 + sat * np.sqrt(np.minimum(mx, 1.0))).astype(np.float32)
-        stack = np.concatenate([img, img * weight[..., None], weight[..., None]], axis=2)
-    else:
-        stack = img
-
-    sat_tab = np.zeros((h + 1, w + 1, stack.shape[2]), dtype=np.float64)
-    np.cumsum(stack, axis=0, out=sat_tab[1:, 1:])
-    np.cumsum(sat_tab[1:, 1:], axis=1, out=sat_tab[1:, 1:])
-    sums = sat_tab[r1, c1] - sat_tab[r0, c1] - sat_tab[r1, c0] + sat_tab[r0, c0]
-    area = ((r1 - r0) * (c1 - c0)).astype(np.float64)[:, None]
-    plain = sums[:, :3] / area
-    if not vivid:
-        return plain.astype(np.float32)
-
-    weighted = sums[:, 3:6] / np.maximum(sums[:, 6:7], 1e-9)
-    v_plain = plain.max(axis=1)
-    v_weighted = weighted.max(axis=1)
-    # Hue/saturation from the weighted mean; brightness between the two means so
-    # a small saturated object on a dark background shows its colour without
-    # blasting the light to full brightness.
-    v = np.sqrt(v_plain * v_weighted)
-    scale = np.where(v_weighted > 1e-9, v / np.maximum(v_weighted, 1e-9), 0.0)
-    return (weighted * scale[:, None]).astype(np.float32)
+    """Convenience wrapper: mean linear colour per region -> (N, 3)."""
+    return IntegralImage(img, vivid).means(regions, bars)
 
 
 # -------------------------------------------------------------------- pipeline
@@ -187,16 +210,29 @@ class ColorProcessor:
     def __init__(self, settings: SyncSettings) -> None:
         self.settings = settings
         self.letterbox = LetterboxDetector()
+        self._integral: IntegralImage | None = None
+        self._integral_key: tuple | None = None
 
     def process(self, frame: Frame, regions: np.ndarray) -> np.ndarray:
         s = self.settings
         img = frame.image
-        if frame.hdr:
-            tonemap(img, frame.peak)
-        else:
-            np.clip(img, 0.0, 1.0, out=img)
-        bars = self.letterbox.update(img) if s.letterbox_detection else (0.0, 0.0)
-        linear = region_means(img, regions, bars, vivid=(s.mode == "vivid"))
+        vivid = s.mode == "vivid"
+        key = (id(frame), frame.timestamp, vivid)
+        if key != self._integral_key:
+            if not frame.mapped:
+                if frame.hdr:
+                    tonemap(img, frame.peak)
+                else:
+                    np.clip(img, 0.0, 1.0, out=img)
+                frame.mapped = True
+            mx = channel_max(img)
+            if s.letterbox_detection:
+                self.letterbox.update(img, mx=mx)
+            self._integral = IntegralImage(img, vivid, mx)
+            self._integral_key = key
+        bars = self.letterbox.bars if s.letterbox_detection else (0.0, 0.0)
+        assert self._integral is not None
+        linear = self._integral.means(regions, bars)
         enc = linear_to_srgb(linear)
         amount = s.saturation * (s.hdr_saturation if frame.hdr else 1.0)
         return saturate(enc, amount)
