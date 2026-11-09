@@ -35,17 +35,21 @@ jobs:
   wayland-smoke:
     # Real xdg-desktop-portal + PipeWire on a headless Sway session: covers the
     # portal D-Bus handshake and PipeWire -> GStreamer frames (not GNOME/KDE).
-    runs-on: ubuntu-24.04
+    # Arch rather than Ubuntu 24.04: its xdg-desktop-portal-wlr 0.7.1 can't
+    # cast without a GPU (see scripts/wayland-smoke.sh).
+    runs-on: ubuntu-latest
+    container: archlinux:latest
     # New and not yet seen green on GitHub; make it blocking once it is.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Wayland, portal and PipeWire packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends sway swaybg xdg-desktop-portal xdg-desktop-portal-wlr \
-            pipewire wireplumber dbus-user-session python3-gi gir1.2-gstreamer-1.0 gstreamer1.0-pipewire \
-            gstreamer1.0-plugins-base gstreamer1.0-plugins-bad gstreamer1.0-tools \
-            python3-numpy python3-platformdirs python3-jeepney
+        run: >-
+          pacman -Syu --noconfirm --needed
+          sway swaybg xdg-desktop-portal xdg-desktop-portal-wlr pipewire wireplumber dbus fuse3
+          gstreamer gst-plugins-base gst-plugins-bad gst-plugin-pipewire
+          python python-gobject python-numpy python-platformdirs python-jeepney
+      - name: Unprivileged user (sway won't run as root)
+        run: useradd -m tester && chown -R tester "$GITHUB_WORKSPACE"
       - name: Portal capture smoke test (headless Sway)
-        run: SHOW_LOGS=1 bash scripts/wayland-smoke.sh
+        run: runuser -u tester -- env SHOW_LOGS=1 bash scripts/wayland-smoke.sh

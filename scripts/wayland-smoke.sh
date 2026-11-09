@@ -7,11 +7,16 @@
 # xdg-desktop-portal-wlr is configured to share HEADLESS-1 without a dialog, so
 # this does not cover GNOME/KDE dialogs or their restore-token handling.
 #
-# Needs (Debian/Ubuntu): sway swaybg xdg-desktop-portal xdg-desktop-portal-wlr
-#   pipewire wireplumber dbus-user-session python3-gi gir1.2-gstreamer-1.0
-#   gstreamer1.0-pipewire gstreamer1.0-plugins-base gstreamer1.0-plugins-bad
-#   gstreamer1.0-tools python3-numpy python3-platformdirs python3-jeepney
-# Set SHOW_LOGS=1 to print the compositor/portal logs even on success.
+# Without a GPU Sway renders with pixman, which offers no DMA-BUF buffers.
+# xdg-desktop-portal-wlr before 0.8 refuses to start a cast in that case
+# ("unable to receive a valid format from wlr_screencopy"), so this needs
+# xdpw >= 0.8 (Arch, Fedora 41+) - Ubuntu 24.04's 0.7.1 only works with a GPU.
+#
+# Needs (Arch): sway swaybg xdg-desktop-portal xdg-desktop-portal-wlr pipewire
+#   wireplumber python-gobject gstreamer gst-plugins-base gst-plugins-bad
+#   gst-plugin-pipewire python-numpy python-platformdirs python-jeepney
+# Run it as a normal user, not root. Set SHOW_LOGS=1 to print the
+# compositor/portal logs even on success.
 set -euo pipefail
 
 if [ -z "${ESPSYNC_SMOKE_INNER:-}" ]; then
@@ -37,11 +42,26 @@ cleanup() {
   local status=$?
   kill $(jobs -p) 2>/dev/null || true
   if [ "$status" -ne 0 ] || [ -n "${SHOW_LOGS:-}" ]; then
-    for f in "$logs"/*.log; do echo "===== $f"; tail -n 30 "$f"; done
+    for f in "$logs"/*.log; do echo "===== $f"; head -n 15 "$f"; echo "....."; tail -n 30 "$f"; done
   fi
-  rm -rf "$tmp"
+  # xdg-desktop-portal may have started the document portal (a FUSE mount).
+  fusermount3 -u "$XDG_RUNTIME_DIR/doc" 2>/dev/null || fusermount -u "$XDG_RUNTIME_DIR/doc" 2>/dev/null || true
+  rm -rf "$tmp" 2>/dev/null || true
+  exit "$status"
 }
 trap cleanup EXIT
+
+libexec() {  # Debian/Fedora: /usr/libexec, Arch: /usr/lib
+  local d
+  for d in /usr/libexec /usr/lib /usr/lib/xdg-desktop-portal; do
+    if [ -x "$d/$1" ]; then echo "$d/$1"; return 0; fi
+  done
+  echo "cannot find $1" >&2
+  return 1
+}
+xdp=$(libexec xdg-desktop-portal)
+xdpw=$(libexec xdg-desktop-portal-wlr)
+echo "$(sway --version 2>/dev/null || echo 'sway ?'); xdg-desktop-portal-wlr $("$xdpw" --version 2>/dev/null || echo '?')"
 
 pipewire >"$logs/pipewire.log" 2>&1 &
 wireplumber >"$logs/wireplumber.log" 2>&1 &
@@ -55,13 +75,15 @@ WAYLAND_DISPLAY=$(basename "$(ls "$XDG_RUNTIME_DIR"/wayland-? | head -n 1)")
 export WAYLAND_DISPLAY
 dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR XDG_CONFIG_HOME
 
-/usr/libexec/xdg-desktop-portal-wlr -l DEBUG >"$logs/xdpw.log" 2>&1 &
+"$xdpw" -l DEBUG >"$logs/xdpw.log" 2>&1 &
 sleep 0.5
-/usr/libexec/xdg-desktop-portal -v >"$logs/xdp.log" 2>&1 &
+"$xdp" -v >"$logs/xdp.log" 2>&1 &
 sleep 1
 # Something that changes every frame, so the compositor keeps sending frames.
+# (Sway tiles the only window over the whole output; waylandsink's
+# fullscreen=true fails with "Window has no size set".)
 gst-launch-1.0 -q videotestsrc pattern=ball is-live=true \
-  ! video/x-raw,width=640,height=360,framerate=30/1 ! waylandsink fullscreen=true >"$logs/anim.log" 2>&1 &
+  ! video/x-raw,width=640,height=360,framerate=30/1 ! waylandsink >"$logs/anim.log" 2>&1 &
 sleep 1
 
 cd "$(dirname "$0")/.."
