@@ -218,6 +218,41 @@ def cmd_bench(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_update(args: argparse.Namespace) -> int:
+    from . import updater
+
+    current = args.pretend_version or updater.current_version()
+    try:
+        info = updater.check(current)
+    except Exception as exc:  # noqa: BLE001 - network/API errors
+        print(f"Couldn't check for updates: {exc}", file=sys.stderr)
+        return 1
+    if info is None:
+        print(f"EspSync {current} is up to date.")
+        return 0
+    print(f"EspSync {info.version} is available (you have {current}): {info.page_url}")
+    if args.check:
+        return 0
+    if not (args.download_only or updater.is_installed_build()):
+        print("This copy wasn't installed with the EspSync installer; download it from the release page.")
+        return 0
+
+    def progress(done: int, total: int) -> None:
+        print(f"\r  downloading {done / 1e6:5.1f} / {total / 1e6:.1f} MB", end="", flush=True)
+
+    try:
+        path = updater.download(info, progress=progress)
+    except updater.UpdateError as exc:
+        print(f"\nUpdate failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"\n  verified {path} (sha256 {info.sha256[:16] + '...' if info.sha256 else 'not published'})")
+    if args.download_only:
+        return 0
+    updater.launch_installer(path, relaunch=False)
+    print("Installer started; it will close EspSync if it is running.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="espsync-cli", description="EspSync headless control")
     p.add_argument("--config", help=f"config file (default {default_config_path()})")
@@ -278,6 +313,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--backend", default="auto", choices=BACKEND_CHOICES)
     s.add_argument("--monitor", type=int)
     s.set_defaults(func=cmd_bench)
+
+    s = sub.add_parser("update", help="check GitHub for a newer release and install it")
+    s.add_argument("--check", action="store_true", help="only report whether an update exists")
+    s.add_argument("--download-only", action="store_true", help="download and verify, don't install")
+    s.add_argument("--pretend-version", help=argparse.SUPPRESS)  # testing: act as an older version
+    s.set_defaults(func=cmd_update)
     return p
 
 

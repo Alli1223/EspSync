@@ -34,6 +34,9 @@ jobs:
           $base = (Select-String -Path espsync/__init__.py -Pattern '__version__ = "(.+)"').Matches[0].Groups[1].Value
           if ("${{ github.ref_type }}" -eq "tag") {
             $v = "${{ github.ref_name }}".TrimStart("v")
+            if (-not $v.StartsWith($base)) {
+              Write-Host "::warning::Tag $v doesn't match __version__ $base in espsync/__init__.py (the installer uses the tag)"
+            }
           } else {
             $v = "$base.${{ github.run_number }}"
           }

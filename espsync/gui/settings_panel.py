@@ -46,7 +46,8 @@ def _spin(lo: float, hi: float, step: float, decimals: int = 2, suffix: str = ""
 
 
 class SettingsPanel(QScrollArea):
-    changed = Signal(str)  # "sync" | "room"
+    changed = Signal(str)  # "sync" | "room" | "output" | "capture" | "updates"
+    checkUpdatesRequested = Signal()
 
     def __init__(self, config: AppConfig, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -155,6 +156,30 @@ class SettingsPanel(QScrollArea):
         f.addRow("Screen width", self.tv_width)
         f.addRow("Horizontal spread", self.spread)
         col.addWidget(room)
+
+        # ----------------------------------------------------------- updates
+        from .. import updater
+
+        upd = QGroupBox("Updates")
+        f = QFormLayout(upd)
+        installed = updater.is_installed_build()
+        f.addRow("Version", QLabel(updater.current_version() + ("" if installed else " (from source)")))
+        self.update_check = QCheckBox("Check GitHub for new releases")
+        self.update_auto = QCheckBox("Install updates automatically (never while syncing)")
+        self.update_auto.setEnabled(installed)
+        if not installed:
+            self.update_auto.setToolTip("Only the installed app can update itself")
+        check_now = QPushButton("Check now")
+        check_now.clicked.connect(self.checkUpdatesRequested.emit)
+        f.addRow("", self.update_check)
+        f.addRow("", self.update_auto)
+        f.addRow("", check_now)
+        col.addWidget(upd)
+        self.update_check.setChecked(self.config.updates.check_automatically)
+        self.update_auto.setChecked(self.config.updates.install_automatically)
+        for box, attr in ((self.update_check, "check_automatically"), (self.update_auto, "install_automatically")):
+            box.toggled.connect(lambda v, a=attr: (setattr(self.config.updates, a, v), self.changed.emit("updates")))
+
         col.addWidget(QLabel("Settings save automatically."))
         col.addStretch(1)
 

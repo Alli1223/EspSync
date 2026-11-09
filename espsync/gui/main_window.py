@@ -33,6 +33,7 @@ from .room_view import RoomView
 from .screen_view import ScreenView
 from .settings_panel import SettingsPanel
 from .tasks import run_async
+from .updates import UpdateManager
 
 log = logging.getLogger(__name__)
 
@@ -133,6 +134,8 @@ class MainWindow(QMainWindow):
         self._stats_timer = QTimer(self, interval=1000, timeout=self._tick_stats)
 
         self.tray = self._make_tray(icon)
+        self.updates = UpdateManager(self)
+        self.settings.checkUpdatesRequested.connect(lambda: self.updates.check(manual=True))
         self.refresh_list()
         if config.lights:
             self.select_light(config.lights[0].id)
@@ -152,8 +155,10 @@ class MainWindow(QMainWindow):
         menu = QMenu()
         self.tray_toggle = menu.addAction("Start sync", lambda: self.sync_btn.toggle())
         menu.addAction("Show window", self._show_window)
+        menu.addAction("Check for updates", lambda: self.updates.check(manual=True))
         menu.addSeparator()
-        menu.addAction("Quit", QApplication.quit)
+        # close() (not QApplication.quit) so closeEvent restores the lights and saves.
+        menu.addAction("Quit", self.close)
         tray.setContextMenu(menu)
         tray.setToolTip("EspSync")
         tray.activated.connect(
@@ -180,6 +185,12 @@ class MainWindow(QMainWindow):
             self.tray_toggle.setText("Stop sync" if on else "Start sync")
             self.tray.setToolTip("EspSync — syncing" if on else "EspSync")
         self._tick_stats()
+        if not on:
+            self.updates.sync_stopped()  # an update may have been waiting for this
+
+    def quit_for_update(self) -> None:
+        """The installer is running: shut down (restoring the lights) so it can replace us."""
+        self.close()
 
     def _restart_engine(self) -> None:
         if self.engine.running and self.engine.sending:

@@ -36,7 +36,20 @@ and download it under *Artifacts*. Run it; no Python needed.
   your PC": click *More info → Run anyway*.
 * The app logs to `%LOCALAPPDATA%\EspSync\Logs\espsync.log`.
 
-To publish a release, push a version tag; CI builds the installer and attaches it:
+**Automatic updates.** The installed app checks GitHub Releases shortly after it
+starts and then every 6 hours. When there's a newer release, it downloads the
+installer and checks it against the SHA-256 GitHub publishes for the file. It
+then closes (restoring your lights), updates in place and starts again.
+* It never updates in the middle of a sync session. It waits until you stop syncing.
+* If the window is open you get a 30-second countdown with *Install now / Skip
+  this version / Later*. From the tray it just updates and shows a notification.
+* Turn it off, or switch to "ask first", under Settings → Updates. *Check now* is
+  there and in the tray menu.
+* From the command line: `espsync-cli update` (or `update --check`).
+
+To publish a release, bump `__version__` in `espsync/__init__.py`, commit, and
+push a version tag. CI builds the installer and attaches it, and installed copies
+pick it up on their next check:
 
 ```bash
 git tag v0.2.0

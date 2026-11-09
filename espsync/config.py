@@ -147,11 +147,19 @@ class SyncSettings:
 
 
 @dataclass
+class UpdateConfig:
+    check_automatically: bool = True  # look at GitHub Releases on start and every few hours
+    install_automatically: bool = True  # installed app: update without asking (never mid-sync)
+    skipped_version: str = ""  # "Skip this version" in the update prompt
+
+
+@dataclass
 class AppConfig:
     devices: list[DeviceConfig] = field(default_factory=list)
     lights: list[LightConfig] = field(default_factory=list)
     room: RoomConfig = field(default_factory=RoomConfig)
     sync: SyncSettings = field(default_factory=SyncSettings)
+    updates: UpdateConfig = field(default_factory=UpdateConfig)
     version: int = 1
 
     # -- lookups ---------------------------------------------------------------

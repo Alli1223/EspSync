@@ -52,9 +52,19 @@ os.makedirs(workpath, exist_ok=True)  # noqa: F821
 with open(version_file, "w", encoding="utf-8") as fh:
     fh.write(str(version_info))
 
+# The app reads its exact build version from this module (espsync/__init__.py),
+# which is what the updater compares against the latest release.
+with open(os.path.join(workpath, "espsync_build.py"), "w", encoding="utf-8") as fh:  # noqa: F821
+    fh.write(f'VERSION = "{version}"\n')
+
 # aioesphomeapi and zeroconf import parts of themselves dynamically (and ship
 # compiled extension modules), so collect them wholesale.
-hidden = collect_submodules("aioesphomeapi") + collect_submodules("zeroconf") + collect_submodules("espsync")
+hidden = (
+    collect_submodules("aioesphomeapi")
+    + collect_submodules("zeroconf")
+    + collect_submodules("espsync")
+    + ["espsync_build"]
+)
 
 # Qt modules we never use; keeps the bundle and installer small.
 excludes = [
@@ -83,7 +93,7 @@ excludes = [
 def analysis(script):
     return Analysis(  # noqa: F821
         [os.path.join(SPECPATH, script)],  # noqa: F821
-        pathex=[ROOT],
+        pathex=[ROOT, workpath],  # noqa: F821 - workpath holds espsync_build.py
         hiddenimports=hidden,
         excludes=excludes,
         noarchive=False,
