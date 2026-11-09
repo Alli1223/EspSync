@@ -338,6 +338,7 @@ class PortalBackend(CaptureBackend):
         self._Gst = load_gstreamer()  # fail before showing a dialog if we couldn't use the result
         self._pipeline = None
         self._fd = -1
+        self._source_size: tuple[int, int] | None = None
         self._portal: ScreenCastPortal | None = ScreenCastPortal(abort=abort)
         self._last_poll = time.monotonic()
         try:

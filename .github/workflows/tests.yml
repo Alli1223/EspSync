@@ -31,3 +31,21 @@ jobs:
       - name: X11 capture smoke test (Linux)
         if: runner.os == 'Linux'
         run: xvfb-run -a python -m espsync bench --backend mss --seconds 1 --regions 50
+
+  wayland-smoke:
+    # Real xdg-desktop-portal + PipeWire on a headless Sway session: covers the
+    # portal D-Bus handshake and PipeWire -> GStreamer frames (not GNOME/KDE).
+    runs-on: ubuntu-24.04
+    # New and not yet seen green on GitHub; make it blocking once it is.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wayland, portal and PipeWire packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends sway swaybg xdg-desktop-portal xdg-desktop-portal-wlr \
+            pipewire wireplumber dbus-user-session python3-gi gir1.2-gstreamer-1.0 gstreamer1.0-pipewire \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-bad gstreamer1.0-tools \
+            python3-numpy python3-platformdirs python3-jeepney
+      - name: Portal capture smoke test (headless Sway)
+        run: SHOW_LOGS=1 bash scripts/wayland-smoke.sh
