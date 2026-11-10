@@ -16,34 +16,57 @@ from collections.abc import Callable, Iterable
 log = logging.getLogger(__name__)
 
 
+_TH32CS_SNAPPROCESS = 0x2
+_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+_toolhelp = None  # (kernel32, PROCESSENTRY32W), built once by _toolhelp_api()
+_toolhelp_lock = threading.Lock()
+
+
+def _toolhelp_api():  # noqa: ANN202
+    """The Toolhelp32 functions and entry struct, declared once per process.
+
+    Declaring them per call created a new ctypes Structure class, pointer type
+    and WinDLL every poll: the classes piled up in ctypes' pointer-type cache
+    (one per poll, every 2 s, for as long as the watcher ran) and the rest were
+    left for the garbage collector to free at arbitrary points.
+    """
+    global _toolhelp
+    with _toolhelp_lock:
+        if _toolhelp is None:
+            from ctypes import wintypes
+
+            class PROCESSENTRY32W(ctypes.Structure):
+                _fields_ = [
+                    ("dwSize", wintypes.DWORD),
+                    ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", wintypes.LONG),
+                    ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", wintypes.WCHAR * 260),
+                ]
+
+            # Our own WinDLL, so these argtypes never clash with ctypes.windll users.
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+            kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+            entry_p = ctypes.POINTER(PROCESSENTRY32W)
+            for fn in (kernel32.Process32FirstW, kernel32.Process32NextW):
+                fn.restype = wintypes.BOOL
+                fn.argtypes = [wintypes.HANDLE, entry_p]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            _toolhelp = (kernel32, PROCESSENTRY32W)
+        return _toolhelp
+
+
 def _windows_process_names() -> set[str]:
-    from ctypes import wintypes
-
-    class PROCESSENTRY32W(ctypes.Structure):
-        _fields_ = [
-            ("dwSize", wintypes.DWORD),
-            ("cntUsage", wintypes.DWORD),
-            ("th32ProcessID", wintypes.DWORD),
-            ("th32DefaultHeapID", ctypes.c_size_t),
-            ("th32ModuleID", wintypes.DWORD),
-            ("cntThreads", wintypes.DWORD),
-            ("th32ParentProcessID", wintypes.DWORD),
-            ("pcPriClassBase", wintypes.LONG),
-            ("dwFlags", wintypes.DWORD),
-            ("szExeFile", wintypes.WCHAR * 260),
-        ]
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
-    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
-    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    TH32CS_SNAPPROCESS = 0x2
-    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
-
-    snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-    if not snap or snap == INVALID_HANDLE_VALUE:
+    kernel32, PROCESSENTRY32W = _toolhelp_api()  # noqa: N806
+    snap = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+    if not snap or snap == _INVALID_HANDLE_VALUE:
         raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot failed")
     names: set[str] = set()
     try:

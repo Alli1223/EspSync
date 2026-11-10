@@ -615,6 +615,25 @@ def test_process_names_lists_this_process():
         assert names
 
 
+def test_process_listing_declares_its_ctypes_types_once():
+    # It runs every 2 s on a background thread: new ctypes classes per call
+    # leaked into ctypes' pointer-type cache and left the rest to the GC.
+    import ctypes
+    import sys
+
+    if sys.platform != "win32":
+        pytest.skip("Toolhelp32 is Windows-only")
+    from espsync import procwatch
+
+    procwatch.process_names()
+    api = procwatch._toolhelp_api()
+    cached = len(ctypes._pointer_type_cache)
+    for _ in range(5):
+        procwatch.process_names()
+    assert procwatch._toolhelp_api() is api
+    assert len(ctypes._pointer_type_cache) == cached
+
+
 def test_srgb_lut_matches_the_colour_module():
     # the tests build strips with color.srgb_to_linear; backends use the LUT
     np.testing.assert_allclose(SRGB_TO_LINEAR[[0, 255]], srgb_to_linear(np.array([0.0, 1.0])), atol=1e-6)
