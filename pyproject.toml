@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "espsync"
-version = "0.1.1"
+version = "0.2.0"
 description = "Low-latency screen-to-light sync (ambilight) for ESPHome lights, with spatial room layout and HDR support."
 readme = "README.md"
 requires-python = ">=3.11"
