@@ -178,6 +178,10 @@ class SyncSettings:
     # Active only while the game runs and its signal strip is on screen.
     wow_effects: bool = True
     wow_low_health: float = 0.35  # red pulse below this share of health
+    # Overwatch: health is read off the HUD's health bar (espsync.overwatch),
+    # active only while the game runs.
+    ow_effects: bool = True
+    ow_low_health: float = 0.3  # heartbeat below this share of health
 
 
 @dataclass

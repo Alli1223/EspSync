@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import logging
 
+import numpy as np
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QCloseEvent, QIcon
+from PySide6.QtGui import QCloseEvent, QColor, QIcon
 from PySide6.QtWidgets import (
     QApplication,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -20,7 +22,6 @@ from PySide6.QtWidgets import (
     QSplitter,
     QSystemTrayIcon,
     QTabWidget,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -29,15 +30,19 @@ from ..config import AppConfig, LightConfig, save_config
 from ..engine import SyncEngine
 from ..hue import HueApi, HueArea
 from ..lights.esphome import identify_light, probe_device
+from ..scenes import SCENES, Scene, SceneResult, apply_scene, scene_by_id
 from .devices_dialog import DevicesDialog
 from .light_panel import EntityChoice, LightPanel
 from .room_view import RoomView
 from .screen_view import ScreenView
 from .settings_panel import SettingsPanel
 from .tasks import run_async
+from .theme import C, restyle, set_kind, set_role, swatch
 from .updates import UpdateManager
 
 log = logging.getLogger(__name__)
+
+IDLE_DOT = (0.3, 0.32, 0.36)
 
 
 class MainWindow(QMainWindow):
@@ -49,51 +54,81 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(icon)
         self.resize(1360, 820)
 
-        # ------------------------------------------------------------ toolbar
-        tb = QToolBar("Sync")
-        tb.setMovable(False)
-        tb.setIconSize(QSize(18, 18))
-        self.addToolBar(tb)
+        self._stop_restore: bool | None = None  # one-off override for the next engine.stop()
+
+        # ------------------------------------------------------------- header
+        header = QWidget()
+        header.setObjectName("header")
+        bar = QHBoxLayout(header)
+        bar.setContentsMargins(14, 10, 14, 10)
+        bar.setSpacing(10)
         self.sync_btn = QPushButton("▶  Start sync")
         self.sync_btn.setCheckable(True)
         self.sync_btn.setMinimumWidth(150)
-        self.sync_btn.setStyleSheet(
-            "QPushButton { padding: 6px 14px; font-weight: 600; border-radius: 5px; background: #2d6cdf; color: white; }"
-            "QPushButton:checked { background: #c0392b; }"
-        )
+        self.sync_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        set_kind(self.sync_btn, "primary")
         self.sync_btn.toggled.connect(self.set_syncing)
-        tb.addWidget(self.sync_btn)
-        tb.addSeparator()
-        devices = QAction("Devices…", self)
-        devices.triggered.connect(lambda: self.open_devices())
-        tb.addAction(devices)
-        tb.addSeparator()
-        # Master brightness for every light (same value as Settings → Colour → Brightness).
-        tb.addWidget(QLabel("  ☀ "))
+        bar.addWidget(self.sync_btn)
+        bar.addWidget(self._divider())
+
+        # Scenes: one click puts every light on a plain white (and stops sync).
+        bar.addWidget(set_role(QLabel("SCENES"), "heading"))
+        self.scene_buttons: dict[str, QPushButton] = {}
+        for scene in SCENES:
+            btn = QPushButton(scene.name)
+            set_kind(btn, "chip")
+            btn.setIcon(QIcon(self._scene_swatch(scene)))
+            btn.setIconSize(QSize(14, 14))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(f"{scene.hint}. Stops sync and sets every light.")
+            btn.clicked.connect(lambda _=False, sid=scene.id: self.apply_scene(sid))
+            self.scene_buttons[scene.id] = btn
+            bar.addWidget(btn)
+        bar.addStretch(1)
+
+        # Master brightness for every light (same value as Picture → Colour → Brightness).
+        sun = QLabel("☀")
+        sun.setToolTip("Sync brightness")
+        set_role(sun, "muted")
+        bar.addWidget(sun)
         self.brightness = QSlider(Qt.Orientation.Horizontal)
         self.brightness.setRange(0, 200)
-        self.brightness.setFixedWidth(160)
-        self.brightness.setToolTip("Brightness of all lights. Above 100% lifts dark scenes.")
+        self.brightness.setFixedWidth(150)
+        self.brightness.setToolTip("Brightness of all lights while syncing. Above 100% lifts dark scenes.")
         self.brightness.setValue(round(config.sync.brightness * 100))
         self.brightness.valueChanged.connect(self._on_brightness)
-        tb.addWidget(self.brightness)
+        bar.addWidget(self.brightness)
         self.brightness_label = QLabel()
-        self.brightness_label.setMinimumWidth(42)
+        self.brightness_label.setMinimumWidth(40)
+        set_role(self.brightness_label, "muted")
         self._show_brightness()
-        tb.addWidget(self.brightness_label)
-        self.status_label = QLabel()
-        self.status_label.setStyleSheet("color: #aaa; padding-left: 12px;")
-        tb.addWidget(self.status_label)
+        bar.addWidget(self.brightness_label)
+        bar.addWidget(self._divider())
+        devices = QPushButton("Devices…")
+        devices.setToolTip("ESPHome devices and Philips Hue bridges")
+        devices.clicked.connect(lambda: self.open_devices())
+        bar.addWidget(devices)
+
+        # ---------------------------------------------------------- status bar
+        status = self.statusBar()
+        status.setSizeGripEnabled(False)
+        self.state_pill = set_role(QLabel("PREVIEW"), "pill")
+        self.status_label = set_role(QLabel(), "muted")
+        status.addWidget(self.state_pill)
+        status.addWidget(self.status_label, 1)
 
         # ---------------------------------------------------------- left: list
         left = QWidget()
         lcol = QVBoxLayout(left)
-        lcol.setContentsMargins(6, 6, 6, 6)
-        lcol.addWidget(QLabel("<b>Lights</b>"))
+        lcol.setContentsMargins(0, 0, 0, 0)
+        lcol.setSpacing(8)
+        lcol.addWidget(set_role(QLabel("LIGHTS"), "heading"))
         self.light_list = QListWidget()
+        self.light_list.setIconSize(QSize(14, 14))
         self.light_list.currentItemChanged.connect(self._on_list_selection)
         lcol.addWidget(self.light_list, 1)
         btns = QHBoxLayout()
+        btns.setSpacing(6)
         add = QPushButton("Add")
         add_menu = QMenu(add)
         add_menu.addAction("Lamp / bulb", lambda: self.add_light("lamp"))
@@ -106,42 +141,72 @@ class MainWindow(QMainWindow):
         remove.clicked.connect(self.remove_light)
         dup = QPushButton("Duplicate")
         dup.clicked.connect(self.duplicate_light)
-        for b in (add, dup, remove):
-            btns.addWidget(b)
+        for b in (dup, remove):
+            set_kind(b, "quiet")
+        btns.addWidget(add, 1)
+        btns.addWidget(dup)
+        btns.addWidget(remove)
         lcol.addLayout(btns)
-        left.setMinimumWidth(200)
+        left.setMinimumWidth(210)
 
         # -------------------------------------------------------- centre/right
         self.room = RoomView(config)
         self.room.lightSelected.connect(self.select_light)
         self.room.lightChanged.connect(self._on_room_moved)
+        centre = QWidget()
+        ccol = QVBoxLayout(centre)
+        ccol.setContentsMargins(0, 0, 0, 0)
+        ccol.setSpacing(8)
+        ccol.addWidget(set_role(QLabel("ROOM"), "heading"))
+        ccol.addWidget(self.room, 1)
 
         self.screen = ScreenView(config)
         self.screen.lightSelected.connect(self.select_light)
         self.screen.regionEdited.connect(self._on_region_edited)
+        preview = QWidget()
+        pcol = QVBoxLayout(preview)
+        pcol.setContentsMargins(0, 0, 0, 0)
+        pcol.setSpacing(8)
+        pcol.addWidget(set_role(QLabel("SCREEN"), "heading"))
+        pcol.addWidget(self.screen, 1)
 
         self.light_panel = LightPanel(config)
         self.light_panel.changed.connect(self._on_light_edited)
         self.light_panel.identifyRequested.connect(self.identify)
         self.light_panel.refreshEntitiesRequested.connect(self.fetch_entities)
         self.light_panel.refreshHueRequested.connect(self.fetch_hue_area)
-        self.settings = SettingsPanel(config)
+        self.settings = SettingsPanel(config, self)
         self.settings.changed.connect(self._on_settings)
-        tabs = QTabWidget()
+        tabs = self.tabs = QTabWidget()
+        tabs.setDocumentMode(True)
         tabs.addTab(self.light_panel, "Light")
-        tabs.addTab(self.settings, "Settings")
+        for title, page in self.settings.pages:
+            tabs.addTab(page, title)
 
         right = QSplitter(Qt.Orientation.Vertical)
-        right.addWidget(self.screen)
+        right.setChildrenCollapsible(False)
+        right.addWidget(preview)
         right.addWidget(tabs)
         right.setSizes([330, 470])
 
         split = QSplitter()
+        split.setChildrenCollapsible(False)
         split.addWidget(left)
-        split.addWidget(self.room)
+        split.addWidget(centre)
         split.addWidget(right)
-        split.setSizes([220, 600, 540])
-        self.setCentralWidget(split)
+        split.setSizes([230, 590, 540])
+
+        central = QWidget()
+        col = QVBoxLayout(central)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+        col.addWidget(header)
+        body = QWidget()
+        bcol = QVBoxLayout(body)
+        bcol.setContentsMargins(14, 12, 14, 10)
+        bcol.addWidget(split)
+        col.addWidget(body, 1)
+        self.setCentralWidget(central)
 
         # ----------------------------------------------------------- timers
         self._save_timer = QTimer(self, singleShot=True, interval=600, timeout=self.save)
@@ -174,6 +239,7 @@ class MainWindow(QMainWindow):
         tray = QSystemTrayIcon(icon, self)
         menu = QMenu()
         self.tray_toggle = menu.addAction("Start sync", lambda: self.sync_btn.toggle())
+        self.add_scene_actions(menu.addMenu("Scene"))
         menu.addAction("Show window", self._show_window)
         menu.addAction("Check for updates", lambda: self.updates.check(manual=True))
         menu.addSeparator()
@@ -196,7 +262,7 @@ class MainWindow(QMainWindow):
     def set_syncing(self, on: bool) -> None:
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            self.engine.stop()
+            self.engine.stop(restore=self._stop_restore)
             self.engine.start(send=on)
         finally:
             QApplication.restoreOverrideCursor()
@@ -207,6 +273,50 @@ class MainWindow(QMainWindow):
         self._tick_stats()
         if not on:
             self.updates.sync_stopped()  # an update may have been waiting for this
+
+    # --------------------------------------------------------------- scenes
+    @staticmethod
+    def _divider() -> QFrame:
+        line = QFrame()
+        line.setObjectName("divider")
+        line.setFixedHeight(24)
+        return line
+
+    @staticmethod
+    def _scene_swatch(scene: Scene):  # noqa: ANN205 - QPixmap
+        if not scene.on:
+            return swatch((0.16, 0.17, 0.2))
+        level = 0.45 + 0.55 * scene.brightness  # dim scenes still read as their colour
+        return swatch(tuple(c * level for c in scene.rgb))
+
+    def add_scene_actions(self, menu: QMenu) -> None:
+        for scene in SCENES:
+            # The action passes its "checked" flag to the first parameter.
+            menu.addAction(QIcon(self._scene_swatch(scene)), scene.name,
+                           lambda _=False, sid=scene.id: self.apply_scene(sid))
+
+    def apply_scene(self, scene_id: str) -> None:
+        """Stop syncing (if running) and set every light to a preset scene."""
+        scene = scene_by_id(scene_id)
+        if scene is None:
+            return
+        if self.sync_btn.isChecked():
+            # The scene replaces "restore the lights": restoring first would make
+            # them jump to their old state and then to the scene.
+            self._stop_restore = False
+            try:
+                self.sync_btn.setChecked(False)
+            finally:
+                self._stop_restore = None
+        self.statusBar().showMessage(f"Setting {scene.name}…")
+
+        def done(result: SceneResult) -> None:
+            self.statusBar().showMessage(result.summary(scene), 8000 if result.errors else 4000)
+
+        def failed(err: str) -> None:
+            self.statusBar().showMessage(f"{scene.name} failed: {err}", 8000)
+
+        run_async(lambda: apply_scene(self.config, scene), done, failed)
 
     def quit_for_update(self) -> None:
         """The installer is running: shut down (restoring the lights) so it can replace us."""
@@ -222,12 +332,14 @@ class MainWindow(QMainWindow):
         self.light_list.blockSignals(True)
         self.light_list.clear()
         for light in self.config.lights:
-            kind = "▬" if light.kind == "strip" else "●"
-            item = QListWidgetItem(f"{kind}  {light.name}")
+            item = QListWidgetItem(light.name + ("" if light.enabled else "  (not synced)"))
             item.setData(Qt.ItemDataRole.UserRole, light.id)
+            item.setToolTip("Addressable strip" if light.kind == "strip" else "Lamp / bulb")
+            item.setIcon(QIcon(swatch(IDLE_DOT)))
             if not light.enabled:
-                item.setForeground(Qt.GlobalColor.gray)
+                item.setForeground(QColor(C.faint))
             self.light_list.addItem(item)
+        self._dots = {}
         self.light_list.blockSignals(False)
         if current:
             self._select_in_list(current)
@@ -342,7 +454,7 @@ class MainWindow(QMainWindow):
         elif kind == "output":
             self._schedule_restart()
         elif kind == "sync":
-            # The Settings brightness slider moved: keep the toolbar one in step.
+            # The Picture tab brightness slider moved: keep the header one in step.
             value = round(self.config.sync.brightness * 100)
             if self.brightness.value() != value:
                 self.brightness.blockSignals(True)
@@ -354,7 +466,9 @@ class MainWindow(QMainWindow):
     def _test_effect(self, kind: str) -> None:
         if not self.engine.running:
             self.engine.start(send=False)  # at least show it in the preview
-        if kind == "levelup":
+        if kind.startswith("ow:"):
+            self.engine.test_overwatch(kind[3:])
+        elif kind == "levelup":
             self.engine.test_levelup()
         else:
             self.engine.test_low_health()
@@ -533,6 +647,23 @@ class MainWindow(QMainWindow):
             self.screen.set_frame(self.engine.preview())
             self.screen.bars = self.engine.stats.bars
             self.screen.hdr = self.engine.stats.hdr
+            self._update_dots()
+
+    def _update_dots(self) -> None:
+        """The colour dot beside each light in the list follows what it is showing."""
+        colors = self.engine.colors()
+        for i in range(self.light_list.count()):
+            item = self.light_list.item(i)
+            lid = item.data(Qt.ItemDataRole.UserRole)
+            light = self.config.light(lid)
+            c = colors.get(lid)
+            if light is None or not light.enabled or c is None or not len(c):
+                rgb = IDLE_DOT
+            else:
+                rgb = tuple(round(float(v), 2) for v in np.clip(np.asarray(c).mean(axis=0), 0.0, 1.0))
+            if self._dots.get(lid) != rgb:
+                self._dots[lid] = rgb
+                item.setIcon(QIcon(swatch(rgb)))
 
     def _tick_stats(self) -> None:
         # The preview capture only matters while the window is on screen;
@@ -544,6 +675,11 @@ class MainWindow(QMainWindow):
             elif not visible and self.engine.running:
                 self.engine.stop()
         st = self.engine.stats
+        state = ("error", "CAPTURE ERROR") if st.error else ("on", "SYNCING") if self.engine.sending else ("", "PREVIEW")
+        if self.state_pill.text() != state[1]:
+            self.state_pill.setText(state[1])
+            self.state_pill.setProperty("state", state[0])
+            restyle(self.state_pill)
         parts = []
         if st.backend:
             parts.append(f"{st.backend.upper()}{' · HDR' if st.hdr else ''}")
@@ -558,7 +694,7 @@ class MainWindow(QMainWindow):
             if errors:
                 parts.append(" · ".join(errors[:3]))
         else:
-            parts.append("preview (not sending)")
+            parts.append("not sending to the lights")
         if st.game:
             parts.append(st.game)
         if st.error:

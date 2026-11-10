@@ -27,10 +27,12 @@ import numpy as np
 from .capture import CaptureBackend, CaptureError, create_backend
 from .color import ColorProcessor, Smoother, linear_to_srgb
 from .config import AppConfig, LightConfig
-from .effects import GameEffects, element_angles
+from . import overwatch
+from .effects import GameEffects, element_angles, element_positions
 from .lights import ApiLightOutput, EffectController, EspHomeDevice, LightOutput, UdpOutput, VirtualOutput
 from .lights.hue import HueEntertainmentStream, HueLightOutput
 from .mapping import DEFAULT_ASPECT, light_regions
+from .overwatch_effects import OverwatchEffects
 from .procwatch import ProcessWatcher
 from .wow import PROBE_SIZE, PROCESS_NAMES, decode_signal, hide_strip
 
@@ -99,7 +101,9 @@ class SyncEngine:
         self._preview: np.ndarray | None = None
         self._preview_time = 0.0
         self.want_preview = True
-        self.game_effects = GameEffects()  # owned by the capture thread
+        self.game_effects = GameEffects()  # World of Warcraft; owned by the capture thread
+        self.overwatch_effects = OverwatchEffects()  # likewise
+        self.overwatch_hud = overwatch.HudReader()
 
         # network-loop state
         self._devices: dict[str, EspHomeDevice] = {}
@@ -197,6 +201,18 @@ class SyncEngine:
         """Pulse as if health were well below the threshold for a few seconds."""
         health = 0.4 * self.config.sync.wow_low_health
         self.game_effects.test_low_health(time.perf_counter(), health, seconds)
+
+    def test_overwatch(self, kind: str) -> None:
+        """Play an Overwatch effect now: "damage", "heal", "lowhealth" or "elimination"."""
+        fx, now = self.overwatch_effects, time.perf_counter()
+        if kind == "damage":
+            fx.test_damage(now)
+        elif kind == "heal":
+            fx.test_heal(now)
+        elif kind == "lowhealth":
+            fx.test_low_health(now, 0.35 * self.config.sync.ow_low_health)
+        elif kind == "elimination":
+            fx.test_elimination(now)
 
     def light_status(self) -> dict[str, str]:
         out = {}
@@ -323,13 +339,17 @@ class SyncEngine:
                 out.submit(colors)
 
     # ----------------------------------------------------------- capture side
-    def _build_plan(
-        self, aspect: float
-    ) -> tuple[np.ndarray, list[tuple[LightConfig, slice]], list[tuple[LightConfig, np.ndarray]]]:
-        """Sample regions, which of them belong to which light, and each light's room angles."""
+    def _build_plan(self, aspect: float) -> tuple[
+        np.ndarray,
+        list[tuple[LightConfig, slice]],
+        list[tuple[LightConfig, np.ndarray]],
+        list[tuple[LightConfig, np.ndarray]],
+    ]:
+        """Sample regions, which of them belong to which light, and each light's room angles and positions."""
         plan = []
         regions = []
         angles = []
+        positions = []
         offset = 0
         for light in self.config.lights:
             if not light.enabled:
@@ -338,9 +358,10 @@ class SyncEngine:
             plan.append((light, slice(offset, offset + len(rs))))
             regions.extend(r.as_list() for r in rs)
             angles.append((light, element_angles(light, self.config.room, aspect)))
+            positions.append((light, element_positions(light, self.config.room, aspect)))
             offset += len(rs)
         arr = np.array(regions, dtype=np.float32).reshape(-1, 4)
-        return arr, plan, angles
+        return arr, plan, angles, positions
 
     def _capture_main(self, generation: int) -> None:
         def stale() -> bool:
@@ -355,8 +376,13 @@ class SyncEngine:
         regions = np.zeros((0, 4), np.float32)
         plan: list[tuple[LightConfig, slice]] = []
         angles: list[tuple[LightConfig, np.ndarray]] = []
+        positions: list[tuple[LightConfig, np.ndarray]] = []
         effects = self.game_effects
-        watcher: ProcessWatcher | None = None  # is the game running?
+        ow_effects = self.overwatch_effects
+        # Is a supported game running?  One watcher per game, only while its effects are on.
+        watchers: dict[str, ProcessWatcher | None] = {"wow": None, "overwatch": None}
+        game_names = {"wow": PROCESS_NAMES, "overwatch": overwatch.PROCESS_NAMES}
+        source_size: tuple[int, int] | None = None
         aspect = DEFAULT_ASPECT
         backend_key = None
         last_frame = None
@@ -372,13 +398,17 @@ class SyncEngine:
                 interval = 1.0 / max(5, min(fps, 240))
                 tick_start = time.perf_counter()
 
-                if s.wow_effects and watcher is None:
-                    watcher = ProcessWatcher(PROCESS_NAMES)
-                    watcher.start()
-                elif not s.wow_effects and watcher is not None:
-                    watcher.stop()
-                    watcher = None
-                game = watcher is not None and watcher.running
+                game = ""
+                for name, enabled in (("wow", s.wow_effects), ("overwatch", s.ow_effects)):
+                    watcher = watchers[name]
+                    if enabled and watcher is None:
+                        watcher = watchers[name] = ProcessWatcher(game_names[name])
+                        watcher.start()
+                    elif not enabled and watcher is not None:
+                        watcher.stop()
+                        watcher = watchers[name] = None
+                    if not game and watcher is not None and watcher.running:
+                        game = name
 
                 key = (s.capture_backend, s.monitor, s.hdr, s.sdr_white_nits, s.hdr_peak_nits)
                 if backend is not None and key != backend_key:
@@ -406,8 +436,14 @@ class SyncEngine:
                     self.stats.backend = backend.name
                     self.stats.error = None
 
-                # Full-resolution corner for the game's signal strip, only while it runs.
-                backend.probe_size = PROBE_SIZE if game else None
+                # A full-resolution piece of the screen, only while a game runs:
+                # the WoW addon's signal strip in the corner, or Overwatch's health bar.
+                if game == "wow":
+                    backend.probe_rect = (0, 0, *PROBE_SIZE)
+                elif game == "overwatch" and source_size is not None:
+                    backend.probe_rect = overwatch.probe_rect(source_size)
+                else:
+                    backend.probe_rect = None
                 try:
                     frame = backend.grab(timeout_ms=max(1, int(interval * 1000)))
                 except CaptureError as exc:
@@ -420,22 +456,28 @@ class SyncEngine:
                 fresh = frame is not None
                 if frame is None and self._regions_dirty and last_frame is not None:
                     frame = last_frame  # layout edited while the screen is static
-                if not game:
+                if game != "wow":
                     effects.observe(None, tick_start)
                 elif fresh and frame is not None:
                     sig = decode_signal(frame.probe)
                     if sig is not None:
                         hide_strip(frame.image, frame.source_size, sig)  # keep it out of the lights
                     effects.observe(sig, frame.timestamp)
+                if game != "overwatch":
+                    ow_effects.observe(None, tick_start)
+                elif fresh and frame is not None:
+                    reading = self.overwatch_hud.read(frame.probe, frame.source_size, frame.timestamp)
+                    ow_effects.observe(reading, frame.timestamp)
                 if frame is not None:
                     last_frame = frame
+                    source_size = frame.source_size
                     frame_count += fresh
                     if abs(frame.aspect - aspect) > 1e-3:
                         aspect = frame.aspect
                         self._regions_dirty = True
                     if self._regions_dirty:
                         self._regions_dirty = False
-                        regions, plan, angles = self._build_plan(aspect)
+                        regions, plan, angles, positions = self._build_plan(aspect)
                     colors = processor.process(frame, regions) if len(regions) else np.zeros((0, 3), np.float32)
                     self.stats.hdr = frame.hdr
                     self.stats.bars = processor.letterbox.bars
@@ -461,6 +503,8 @@ class SyncEngine:
                         out[light.id] = smoother.apply(light.id, t, dt, tau)
                 if effects.active:
                     out = effects.apply(out, angles, s, now)
+                if ow_effects.active:
+                    out = ow_effects.apply(out, positions, s, now)
                 with self._lock:
                     self._colors = out
                 self._latest = out
@@ -475,7 +519,12 @@ class SyncEngine:
                     self.stats.loop_fps = loop_count / (now - rate_t0)
                     self.stats.lights = self.light_status()
                     self.stats.streams = self.stream_status()
-                    self.stats.game = f"WoW: {effects.status_text()}" if game else ""
+                    if game == "wow":
+                        self.stats.game = f"WoW: {effects.status_text()}"
+                    elif game == "overwatch":
+                        self.stats.game = f"Overwatch: {ow_effects.status_text()}"
+                    else:
+                        self.stats.game = ""
                     frame_count = loop_count = 0
                     rate_t0 = now
 
@@ -487,8 +536,9 @@ class SyncEngine:
             log.exception("capture loop crashed")
             self.stats.error = str(exc)
         finally:
-            if watcher is not None:
-                watcher.stop()
+            for watcher in watchers.values():
+                if watcher is not None:
+                    watcher.stop()
             self.stats.game = ""
             if backend is not None:
                 backend.close()

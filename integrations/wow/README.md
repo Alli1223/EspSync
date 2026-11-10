@@ -36,7 +36,7 @@ and dead/ghost state, never acts on the game, and has no network or file access.
 
 ### From EspSync (easiest)
 
-1. In EspSync, open **Settings → Game effects** and click **Install WoW addon…**.
+1. In EspSync, open the **Games** tab and click **Install WoW addon…**.
 2. EspSync finds your World of Warcraft folder (from the Battle.net install
    entries in the Windows registry) and lists the game versions in it
    (`_retail_`, `_forever_`, `_classic_era_`, …), each with whether the addon is
@@ -81,7 +81,7 @@ addon is older than the bundled one.
 
 ## Set up EspSync
 
-* In EspSync's **Settings → Game effects**, keep **World of Warcraft** ticked and
+* In EspSync's **Games** tab, keep **World of Warcraft** ticked and
   choose the low-health threshold.
 * Capture the display WoW runs on. Use **Windowed (Fullscreen)** or
   **Fullscreen** display mode: in a smaller window the strip isn't in the
@@ -109,4 +109,4 @@ For a real low-health test, take some falling damage or fight a target dummy.
   ultrawide setups do this) move the strip too. Hiding the UI (Alt+Z) and
   cinematics hide the strip, which pauses the effects. That's intended.
 * **Wrong display:** EspSync looks at the top-left corner of the display chosen in
-  **Settings → Capture → Display**.
+  **Picture → Capture → Display**.

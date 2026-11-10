@@ -6,7 +6,16 @@ from collections.abc import Callable
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPainterPathStroker, QPen
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QFont,
+    QPainter,
+    QPainterPath,
+    QPainterPathStroker,
+    QPen,
+    QRadialGradient,
+)
 from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsObject,
@@ -18,10 +27,12 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import AppConfig, LightConfig, RoomConfig
+from .theme import C
 
 ROOM_PX = 520.0
 LAMP_R = 15.0
-IDLE = QColor(90, 90, 100)
+GLOW_R = 46.0  # how far a lamp's light spills over the floor
+IDLE = QColor(84, 90, 104)
 
 
 def qcolor(rgb: np.ndarray | None) -> QColor:
@@ -74,7 +85,7 @@ class LampItem(QGraphicsObject):
         self.setToolTip("Drag to move · scroll to change height")
 
     def boundingRect(self) -> QRectF:
-        return QRectF(-70, -LAMP_R - 4, 140, 2 * LAMP_R + 26)
+        return QRectF(-70, -GLOW_R, 140, 2 * GLOW_R)
 
     def shape(self) -> QPainterPath:
         path = QPainterPath()
@@ -84,26 +95,31 @@ class LampItem(QGraphicsObject):
     def paint(self, p: QPainter, option: QStyleOptionGraphicsItem, widget: QWidget | None = None) -> None:
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         enabled = self.light.enabled
-        glow = QColor(self.color)
-        glow.setAlpha(70 if enabled else 0)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(glow)
-        p.drawEllipse(QPointF(0, 0), LAMP_R + 4, LAMP_R + 4)
+        if enabled and self.color != IDLE:
+            # The light it throws on the floor.
+            glow = QRadialGradient(QPointF(0, 0), GLOW_R)
+            inner, outer = QColor(self.color), QColor(self.color)
+            inner.setAlpha(95)
+            outer.setAlpha(0)
+            glow.setColorAt(0.25, inner)
+            glow.setColorAt(1.0, outer)
+            p.setBrush(glow)
+            p.drawEllipse(QPointF(0, 0), GLOW_R, GLOW_R)
         p.setBrush(self.color if enabled else IDLE.darker(150))
-        pen = QPen(QColor("white") if self.isSelected() else QColor(30, 30, 35), 2.5 if self.isSelected() else 1.5)
-        p.setPen(pen)
+        selected = self.isSelected()
+        p.setPen(QPen(QColor("white") if selected else QColor(C.window), 2.5 if selected else 2.0))
         p.drawEllipse(QPointF(0, 0), LAMP_R, LAMP_R)
         # Height gauge
-        bar = QRectF(LAMP_R + 5, -LAMP_R, 5, 2 * LAMP_R)
-        p.setPen(QPen(QColor(150, 150, 160), 1))
-        p.setBrush(QColor(40, 40, 46))
-        p.drawRect(bar)
-        fill = bar.height() * max(0.0, min(1.0, self.light.z))
+        bar = QRectF(LAMP_R + 6, -LAMP_R + 2, 4, 2 * LAMP_R - 4)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(200, 200, 210))
-        p.drawRect(QRectF(bar.left(), bar.bottom() - fill, bar.width(), fill))
+        p.setBrush(QColor(C.border_strong))
+        p.drawRoundedRect(bar, 2, 2)
+        fill = bar.height() * max(0.0, min(1.0, self.light.z))
+        p.setBrush(QColor(C.text))
+        p.drawRoundedRect(QRectF(bar.left(), bar.bottom() - fill, bar.width(), fill), 2, 2)
         # Label
-        p.setPen(QColor(230, 230, 235) if enabled else QColor(130, 130, 135))
+        p.setPen(QColor(C.text) if enabled else QColor(C.faint))
         f = QFont(p.font())
         f.setPointSizeF(8.5)
         p.setFont(f)
@@ -215,7 +231,7 @@ class StripItem(QGraphicsObject):
         if self.isSelected():
             p.setPen(QPen(QColor(255, 255, 255, 160), 11, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             p.drawPath(path)
-        p.setPen(QPen(QColor(25, 25, 30), 8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setPen(QPen(QColor(C.window), 8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         p.drawPath(path)
         colors = self.colors
         n = len(colors) if colors is not None and self.light.enabled else 0
@@ -231,7 +247,7 @@ class StripItem(QGraphicsObject):
         else:
             p.setPen(QPen(IDLE, 5))
             p.drawPath(path)
-        p.setPen(QColor(220, 220, 225))
+        p.setPen(QColor(C.text) if self.light.enabled else QColor(C.faint))
         f = QFont(p.font())
         f.setPointSizeF(8.5)
         p.setFont(f)
@@ -256,7 +272,7 @@ class RoomView(QGraphicsView):
         self.config = config
         self.setScene(QGraphicsScene(self))
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.setBackgroundBrush(QColor(24, 24, 28))
+        self.setBackgroundBrush(QColor(C.canvas))
         self.setMinimumSize(360, 300)
         self.items_by_id: dict[str, LampItem | StripItem] = {}
         self._suppress = False
@@ -274,26 +290,31 @@ class RoomView(QGraphicsView):
         room = geo.rect
         scene.setSceneRect(room.adjusted(-40, -50, 40, 40))
 
-        scene.addRect(room, QPen(QColor(120, 120, 130), 2), QBrush(QColor(34, 34, 40)))
-        grid = QPen(QColor(48, 48, 56), 1, Qt.PenStyle.DashLine)
+        floor = QPainterPath()
+        floor.addRoundedRect(room, 8, 8)
+        scene.addPath(floor, QPen(QColor(C.border_strong), 1.5), QBrush(QColor(C.floor)))
+        grid = QPen(QColor(C.grid), 1, Qt.PenStyle.DashLine)
         for i in range(1, 4):
             x = room.left() + room.width() * i / 4
             y = room.top() + room.height() * i / 4
             scene.addLine(x, room.top(), x, room.bottom(), grid)
             scene.addLine(room.left(), y, room.right(), y, grid)
 
-        tv = QRectF(-geo.tv_w / 2, room.top() - 6, geo.tv_w, 10)
-        scene.addRect(tv, QPen(QColor(160, 160, 170), 1), QBrush(QColor(10, 10, 12)))
+        tv = QPainterPath()
+        tv.addRoundedRect(QRectF(-geo.tv_w / 2, room.top() - 5, geo.tv_w, 8), 3, 3)
+        scene.addPath(tv, QPen(QColor(C.muted), 1), QBrush(QColor("#07080a")))
         label = scene.addSimpleText("SCREEN")
-        label.setBrush(QColor(170, 170, 180))
+        label.setBrush(QColor(C.muted))
         label.setPos(-label.boundingRect().width() / 2, room.top() - 28)
-        sofa = QRectF(-geo.w * 0.18, geo.d * 0.22, geo.w * 0.36, 26)
-        scene.addRect(sofa, QPen(QColor(70, 70, 80), 1), QBrush(QColor(44, 44, 52)))
+        sofa = QPainterPath()
+        sofa_rect = QRectF(-geo.w * 0.18, geo.d * 0.22, geo.w * 0.36, 26)
+        sofa.addRoundedRect(sofa_rect, 7, 7)
+        scene.addPath(sofa, QPen(QColor(C.border_strong), 1), QBrush(QColor(C.raised)))
         sofa_label = scene.addSimpleText("you")
-        sofa_label.setBrush(QColor(110, 110, 120))
-        sofa_label.setPos(-sofa_label.boundingRect().width() / 2, sofa.center().y() - 8)
+        sofa_label.setBrush(QColor(C.faint))
+        sofa_label.setPos(-sofa_label.boundingRect().width() / 2, sofa_rect.center().y() - 8)
         hint = scene.addSimpleText("Drag lights to where they are in the room · scroll over a lamp to set its height")
-        hint.setBrush(QColor(110, 110, 120))
+        hint.setBrush(QColor(C.faint))
         hint.setPos(-hint.boundingRect().width() / 2, room.bottom() + 10)
 
         for light in self.config.lights:

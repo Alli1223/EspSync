@@ -68,7 +68,7 @@ class DeviceEditDialog(QDialog):
         self.test_btn.clicked.connect(self._test)
         help_label = QLabel(KEY_HELP)
         help_label.setWordWrap(True)
-        help_label.setStyleSheet("color: #999;")
+        help_label.setProperty("role", "hint")
 
         form.addRow("Name", self.name)
         form.addRow("Host", self.host)

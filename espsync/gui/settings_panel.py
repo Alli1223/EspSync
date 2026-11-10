@@ -1,8 +1,8 @@
-"""Global sync / capture / room settings."""
+"""Global sync / capture / game / room settings, as pages for the main window's tabs."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from ..capture import available_backends, list_monitors
 from ..config import AppConfig
+from .theme import set_role
 from .wow_addon_dialog import WowAddonDialog
 
 BACKEND_LABELS = {
@@ -31,6 +32,8 @@ BACKEND_LABELS = {
 WOW_HELP_URL = "https://github.com/Alli1223/EspSync/blob/main/integrations/wow/README.md"
 
 SMOOTHING_PRESETS = [("Instant (gaming)", 0), ("Fast", 40), ("Balanced", 80), ("Smooth (movies)", 160), ("Subtle", 320)]
+
+OVERWATCH_TESTS = [("Damage", "damage"), ("Healing", "heal"), ("Critical", "lowhealth"), ("Eliminated", "elimination")]
 
 
 def _slider(lo: int, hi: int) -> QSlider:
@@ -48,23 +51,50 @@ def _spin(lo: float, hi: float, step: float, decimals: int = 2, suffix: str = ""
     return s
 
 
-class SettingsPanel(QScrollArea):
+def _form(box: QGroupBox) -> QFormLayout:
+    f = QFormLayout(box)
+    f.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+    f.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    f.setHorizontalSpacing(14)
+    f.setVerticalSpacing(9)
+    return f
+
+
+def _row(*widgets: QWidget) -> QWidget:
+    holder = QWidget()
+    row = QHBoxLayout(holder)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(6)
+    for w in widgets:
+        row.addWidget(w)
+    row.addStretch(1)
+    return holder
+
+
+def _hint(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setWordWrap(True)
+    set_role(label, "hint")
+    return label
+
+
+class SettingsPanel(QObject):
+    """Owns every settings widget; `pages` are (title, widget) pairs for a tab widget."""
+
     changed = Signal(str)  # "sync" | "room" | "output" | "updates"
     checkUpdatesRequested = Signal()
-    testEffectRequested = Signal(str)  # "levelup" | "lowhealth"
+    # "levelup" | "lowhealth" (World of Warcraft), "ow:damage" | "ow:heal" | "ow:lowhealth" | "ow:elimination"
+    testEffectRequested = Signal(str)
 
-    def __init__(self, config: AppConfig, parent: QWidget | None = None) -> None:
+    def __init__(self, config: AppConfig, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.config = config
         self._loading = False
-        self.setWidgetResizable(True)
-        body = QWidget()
-        self.setWidget(body)
-        col = QVBoxLayout(body)
+        self.pages: list[tuple[str, QWidget]] = []
 
         # ----------------------------------------------------------- capture
-        cap = QGroupBox("Capture")
-        f = QFormLayout(cap)
+        cap = QGroupBox("CAPTURE")
+        f = _form(cap)
         self.monitor = QComboBox()
         self.backend = QComboBox()
         self.backend.addItem("Automatic", "auto")
@@ -89,12 +119,11 @@ class SettingsPanel(QScrollArea):
         f.addRow("HDR", self.hdr)
         f.addRow("SDR white", self.sdr_white)
         f.addRow("HDR peak", self.peak)
-        f.addRow("", self.gpu_priority)
-        col.addWidget(cap)
+        f.addRow(self.gpu_priority)
 
         # ------------------------------------------------------------ colour
-        colour = QGroupBox("Colour")
-        f = QFormLayout(colour)
+        colour = QGroupBox("COLOUR")
+        f = _form(colour)
         self.mode = QComboBox()
         self.mode.addItem("Vivid (favour saturated colours)", "vivid")
         self.mode.addItem("Average", "average")
@@ -118,13 +147,58 @@ class SettingsPanel(QScrollArea):
         f.addRow("Smoothing", self.smoothing_preset)
         f.addRow("", self.smoothing)
         f.addRow("Min brightness", self.min_brightness)
-        f.addRow("", self.black_off)
-        f.addRow("", self.letterbox)
-        col.addWidget(colour)
+        f.addRow(self.black_off)
+        f.addRow(self.letterbox)
+        self._add_page("Picture", cap, colour)
+
+        # ------------------------------------------------------ game effects
+        wow = QGroupBox("WORLD OF WARCRAFT")
+        f = _form(wow)
+        self.wow = QCheckBox("Red pulse at low health, gold sweep on level-up")
+        self.wow.setToolTip("Active only while WoW runs with the EspSync addon, which draws a thin strip "
+                            "in the top-left corner of the screen")
+        self.wow_threshold = QSpinBox()
+        self.wow_threshold.setRange(5, 90)
+        self.wow_threshold.setSuffix(" %")
+        self.wow_threshold.setToolTip("The lights pulse red below this much health, faster and stronger as it drops")
+        self.test_low_health = QPushButton("Low health")
+        self.test_levelup = QPushButton("Level-up")
+        self.test_low_health.clicked.connect(lambda: self.testEffectRequested.emit("lowhealth"))
+        self.test_levelup.clicked.connect(lambda: self.testEffectRequested.emit("levelup"))
+        self.install_addon = QPushButton("Install WoW addon…")
+        self.install_addon.setToolTip("Copy the EspSync addon, which the effects need, into World of Warcraft")
+        self.install_addon.clicked.connect(self._on_install_addon)
+        help_label = QLabel(f'<a href="{WOW_HELP_URL}">Setup help</a>')
+        help_label.setOpenExternalLinks(True)
+        f.addRow(self.wow)
+        f.addRow("Low health below", self.wow_threshold)
+        f.addRow("Try it", _row(self.test_low_health, self.test_levelup))
+        f.addRow("Addon", _row(self.install_addon, help_label))
+
+        ow = QGroupBox("OVERWATCH")
+        f = _form(ow)
+        self.ow = QCheckBox("React to damage, healing, critical health and eliminations")
+        self.ow.setToolTip("Active only while Overwatch runs. EspSync reads the health bar from the captured "
+                           "picture; it never touches the game itself")
+        self.ow_threshold = QSpinBox()
+        self.ow_threshold.setRange(5, 90)
+        self.ow_threshold.setSuffix(" %")
+        self.ow_threshold.setToolTip("A red heartbeat starts below this much health and quickens as it drops")
+        self.ow_tests: dict[str, QPushButton] = {}
+        for label, kind in OVERWATCH_TESTS:
+            btn = QPushButton(label)
+            btn.clicked.connect(lambda _=False, k=kind: self.testEffectRequested.emit(f"ow:{k}"))
+            self.ow_tests[kind] = btn
+        f.addRow(self.ow)
+        f.addRow("Critical below", self.ow_threshold)
+        f.addRow("Try it", _row(*self.ow_tests.values()))
+        f.addRow(_hint("No addon needed: the health bar in the bottom-left of the screen is read while you play, "
+                       "so keep the HUD at its default size and position. The status bar shows what was read."))
+        self._add_page("Games", wow, ow)
 
         # ------------------------------------------------------------ output
-        out = QGroupBox("Lights")
-        f = QFormLayout(out)
+        out = QGroupBox("LIGHT OUTPUT")
+        f = _form(out)
         self.api_rate = QSpinBox()
         self.api_rate.setRange(1, 100)
         self.api_rate.setSuffix(" updates/s")
@@ -146,49 +220,11 @@ class SettingsPanel(QScrollArea):
         f.addRow("UDP rate", self.udp_rate)
         f.addRow("Hue rate", self.hue_rate)
         f.addRow("Transition", self.transition)
-        f.addRow("", self.restore)
-        col.addWidget(out)
-
-        # ------------------------------------------------------ game effects
-        game = QGroupBox("Game effects")
-        f = QFormLayout(game)
-        self.wow = QCheckBox("World of Warcraft: red pulse at low health, gold sweep on level-up")
-        self.wow.setToolTip("Active only while WoW runs with the EspSync addon, which draws a thin strip "
-                            "in the top-left corner of the screen")
-        self.wow_threshold = QSpinBox()
-        self.wow_threshold.setRange(5, 90)
-        self.wow_threshold.setSuffix(" %")
-        self.wow_threshold.setToolTip("The lights pulse red below this much health, faster and stronger as it drops")
-        tests = QWidget()
-        row = QHBoxLayout(tests)
-        row.setContentsMargins(0, 0, 0, 0)
-        self.test_low_health = QPushButton("Test low health")
-        self.test_levelup = QPushButton("Test level-up")
-        row.addWidget(self.test_low_health)
-        row.addWidget(self.test_levelup)
-        row.addStretch(1)
-        self.test_low_health.clicked.connect(lambda: self.testEffectRequested.emit("lowhealth"))
-        self.test_levelup.clicked.connect(lambda: self.testEffectRequested.emit("levelup"))
-        addon = QWidget()
-        row = QHBoxLayout(addon)
-        row.setContentsMargins(0, 0, 0, 0)
-        self.install_addon = QPushButton("Install WoW addon…")
-        self.install_addon.setToolTip("Copy the EspSync addon, which the effects need, into World of Warcraft")
-        self.install_addon.clicked.connect(self._on_install_addon)
-        help_label = QLabel(f'<a href="{WOW_HELP_URL}">Setup help</a>')
-        help_label.setOpenExternalLinks(True)
-        row.addWidget(self.install_addon)
-        row.addWidget(help_label)
-        row.addStretch(1)
-        f.addRow("", self.wow)
-        f.addRow("Low health below", self.wow_threshold)
-        f.addRow("", tests)
-        f.addRow("Addon", addon)
-        col.addWidget(game)
+        f.addRow(self.restore)
 
         # -------------------------------------------------------------- room
-        room = QGroupBox("Room")
-        f = QFormLayout(room)
+        room = QGroupBox("ROOM")
+        f = _form(room)
         self.room_w = _spin(1, 30, 0.5, 1, " m")
         self.room_d = _spin(1, 30, 0.5, 1, " m")
         self.tv_width = _slider(5, 100)
@@ -198,13 +234,12 @@ class SettingsPanel(QScrollArea):
         f.addRow("Depth", self.room_d)
         f.addRow("Screen width", self.tv_width)
         f.addRow("Horizontal spread", self.spread)
-        col.addWidget(room)
 
         # ----------------------------------------------------------- updates
         from .. import updater
 
-        upd = QGroupBox("Updates")
-        f = QFormLayout(upd)
+        upd = QGroupBox("UPDATES")
+        f = _form(upd)
         installed = updater.is_installed_build()
         f.addRow("Version", QLabel(updater.current_version() + ("" if installed else " (from source)")))
         self.update_check = QCheckBox("Check GitHub for new releases")
@@ -212,22 +247,38 @@ class SettingsPanel(QScrollArea):
         self.update_auto.setEnabled(installed)
         if not installed:
             self.update_auto.setToolTip("Only the installed app can update itself")
-        check_now = QPushButton("Check now")
-        check_now.clicked.connect(self.checkUpdatesRequested.emit)
-        f.addRow("", self.update_check)
-        f.addRow("", self.update_auto)
-        f.addRow("", check_now)
-        col.addWidget(upd)
+        self.check_now = QPushButton("Check now")
+        self.check_now.clicked.connect(self.checkUpdatesRequested.emit)
+        f.addRow(self.update_check)
+        f.addRow(self.update_auto)
+        f.addRow(_row(self.check_now))
         self.update_check.setChecked(self.config.updates.check_automatically)
         self.update_auto.setChecked(self.config.updates.install_automatically)
         for box, attr in ((self.update_check, "check_automatically"), (self.update_auto, "install_automatically")):
             box.toggled.connect(lambda v, a=attr: (setattr(self.config.updates, a, v), self.changed.emit("updates")))
-
-        col.addWidget(QLabel("Settings save automatically."))
-        col.addStretch(1)
+        self._add_page("Setup", out, room, upd, _hint("Settings save automatically."))
 
         self.load()
         self._connect()
+
+    def _add_page(self, title: str, *widgets: QWidget) -> None:
+        page = QScrollArea()
+        page.setWidgetResizable(True)
+        body = QWidget()
+        col = QVBoxLayout(body)
+        col.setContentsMargins(12, 6, 12, 12)
+        col.setSpacing(4)
+        for w in widgets:
+            col.addWidget(w)
+        col.addStretch(1)
+        page.setWidget(body)
+        self.pages.append((title, page))
+
+    def deleteLater(self) -> None:
+        for _, page in self.pages:
+            if page.parent() is None:
+                page.deleteLater()
+        super().deleteLater()
 
     # ----------------------------------------------------------------- load
     def refresh_monitors(self) -> None:
@@ -269,6 +320,9 @@ class SettingsPanel(QScrollArea):
         self.wow.setChecked(s.wow_effects)
         self.wow_threshold.setValue(round(s.wow_low_health * 100))
         self.wow_threshold.setEnabled(s.wow_effects)
+        self.ow.setChecked(s.ow_effects)
+        self.ow_threshold.setValue(round(s.ow_low_health * 100))
+        self.ow_threshold.setEnabled(s.ow_effects)
         self.room_w.setValue(r.width_m)
         self.room_d.setValue(r.depth_m)
         self.tv_width.setValue(round(r.tv_width * 100))
@@ -321,6 +375,9 @@ class SettingsPanel(QScrollArea):
         bind(self.wow.toggled, s, "wow_effects")
         bind(self.wow_threshold.valueChanged, s, "wow_low_health", lambda v: v / 100)
         self.wow.toggled.connect(self.wow_threshold.setEnabled)
+        bind(self.ow.toggled, s, "ow_effects")
+        bind(self.ow_threshold.valueChanged, s, "ow_low_health", lambda v: v / 100)
+        self.ow.toggled.connect(self.ow_threshold.setEnabled)
         bind(self.room_w.valueChanged, r, "width_m", float, "room")
         bind(self.room_d.valueChanged, r, "depth_m", float, "room")
         bind(self.tv_width.valueChanged, r, "tv_width", lambda v: v / 100, "room")
@@ -343,7 +400,7 @@ class SettingsPanel(QScrollArea):
         self.changed.emit("sync")
 
     def _on_install_addon(self) -> None:
-        WowAddonDialog(self).exec()
+        WowAddonDialog(self.install_addon.window()).exec()
 
     def _on_preset(self, idx: int) -> None:
         if self._loading or idx >= len(SMOOTHING_PRESETS):

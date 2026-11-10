@@ -21,6 +21,11 @@ and **Philips Hue** lights alongside them, on **Windows and Linux**.
 * **World of Warcraft effects.** With the small EspSync addon, the lights pulse
   red when your health is low and a gold sweep circles the room when you level
   up. See [integrations/wow](integrations/wow/README.md).
+* **Overwatch effects**, no addon needed: a red flash when you take damage, a
+  heartbeat at critical health, a gold wave when you are healed, and the room
+  draining to grey when you are eliminated. See [Overwatch](#overwatch).
+* **Scenes.** One click on *Warm white*, *Relax*, *Daylight*… stops the sync and
+  puts every light back on a normal white. See [Scenes](#scenes).
 
 ## Install
 
@@ -49,7 +54,7 @@ then closes (restoring your lights), updates in place and starts again.
 * It never updates in the middle of a sync session. It waits until you stop syncing.
 * If the window is open you get a 30-second countdown with *Install now / Skip
   this version / Later*. From the tray it just updates and shows a notification.
-* Turn it off, or switch to "ask first", under Settings → Updates. *Check now* is
+* Turn it off, or switch to "ask first", under Setup → Updates. *Check now* is
   there and in the tray menu.
 * From the command line: `espsync-cli update` (or `update --check`).
 
@@ -139,7 +144,7 @@ api:
 
 * EspSync sends every update with a **0 ms transition**, so the light's
   `default_transition_length` doesn't matter.
-* **Rate**: Settings → *API rate* caps commands per light (default 30/s).
+* **Rate**: Setup → *API rate* caps commands per light (default 30/s).
   ESP32s cope with 30-50/s; keep ESP8266s at ≤ 25.
 * **Smoothing** adds perceived lag by design. Use *Instant* or *Fast* for games,
   *Smooth* for films.
@@ -231,12 +236,70 @@ Notes:
   how they were when sync stops* in Settings to keep the last colours.
 * Each Hue light's *Output* is **Philips Hue (Entertainment)**, with the bridge
   and the entertainment channels it drives. A lamp sends one colour to all ticked
-  channels; a strip sends one LED per channel. *Settings → Hue rate* sets the
+  channels; a strip sends one LED per channel. *Setup → Hue rate* sets the
   packets per second (the bridge drives the lights at about 25 Hz; 50 rides
   out lost packets).
 * The pairing key is stored in the config file, like ESPHome keys. EspSync
   doesn't check the bridge's HTTPS certificate (Hue bridges use their own CA);
   the stream itself is authenticated with the pairing key.
+
+## Scenes
+
+The row of scene buttons at the top of the window (also under *Scene* in the
+tray menu) sets every synced light to a steady colour:
+
+| Scene | Colour | Brightness |
+| --- | --- | --- |
+| Warm white | 2700 K | 100% |
+| Relax | 2200 K | 55% |
+| Neutral | 4000 K | 100% |
+| Daylight | 5500 K | 100% |
+| Night light | 2000 K | 10% |
+| Off | lights off | |
+
+Clicking one while syncing stops the sync first; the scene then takes the place
+of "restore lights when sync stops". ESPHome lights with white channels use them
+(colour temperature, cold/warm white or plain white), RGB-only lights get the
+nearest RGB colour, and a running effect (including a strip's WLED / E1.31
+effect) is switched off. Hue lights get the colour temperature over the bridge's
+REST API. A strip configured with only a UDP address has no API to set a colour
+with, so it is skipped: give it its ESPHome device and light.
+
+From the command line: `espsync-cli scene warm` (`espsync-cli scene` lists them).
+
+## Overwatch
+
+Turn it on under *Games → Overwatch* (it is on by default). It is active only
+while `Overwatch.exe` runs.
+
+| In the game | In the room |
+| --- | --- |
+| You take damage | A sharp red flash, stronger the bigger the hit |
+| Health below the *Critical below* setting | A red double-beat heartbeat that quickens as health drops |
+| You are healed | A warm gold wave from the back of the room to the screen |
+| You are eliminated | A red flash, then the room drains to a dim grey-red until you are back |
+| You respawn | A cold blue-white burst from the screen wall to the back of the room |
+
+The *Try it* buttons play each effect without the game.
+
+**How it reads the game.** Overwatch has no addon or telemetry API, so EspSync
+reads the health bar in the bottom-left of the HUD from the screen capture it
+already makes. It never touches the game's process or memory. Health, armour and
+shields all count; the bar's length over its full width is your health.
+
+* Keep the HUD at its default size and position. The reader finds the bar by
+  its shape (thickness, tilt, the name plate under it), locks on to that spot
+  after seeing it a few times with at least 40% health, and from then on reads
+  only that spot. The status bar shows `Overwatch: health 76%` once it has it.
+* An elimination is inferred: the bar disappears right after you took damage, or
+  while your health was critical. Opening a menu at full health is not one. A
+  one-shot from full health that never shows a damaged bar is missed.
+* It was built from measurements of 16:9 and 21:9 gameplay footage and is tested
+  against drawn copies of the HUD, not yet against every hero, resolution and
+  HUD setting. To check it on your setup, run `espsync-cli overwatch-hud` while
+  playing: it prints what it reads and where it found the bar.
+* Works in SDR and HDR, borderless or windowed-fullscreen. Exclusive fullscreen
+  can interrupt capture (see [Platform notes](#platform-notes)).
 
 ## How it works
 
@@ -248,14 +311,14 @@ Notes:
                                                      │
                     per-light regions (from room layout) ─► mean / vivid colour
                                                      │
-                          smoothing ─► game effects (WoW) ─► latest-value-wins per light (no queues)
+                          smoothing ─► game effects (WoW, Overwatch) ─► latest-value-wins per light
                                                      │
    ESPHome native API (TCP, Noise)  /  WLED or E1.31 UDP  /  Hue Entertainment (DTLS)
 ```
 
 * **Room → screen mapping.** Room `x` (left ↔ right wall) maps to screen
   horizontal, height maps to screen vertical, and distance from the screen wall
-  widens the sample area. *Horizontal spread* (Settings → Room) pushes side
+  widens the sample area. *Horizontal spread* (Setup → Room) pushes side
   lights further toward the screen edges.
 * **HDR.** With Windows HDR on, the capture is linear scRGB. EspSync divides by
   Windows' *SDR content brightness* (read live from the display config), so SDR
@@ -282,6 +345,8 @@ espsync-cli hue-test --pattern positions          # front red / back blue, left 
 espsync-cli monitors
 espsync-cli bench                                 # capture + processing speed
 espsync-cli run                                   # sync until Ctrl+C, prints live stats
+espsync-cli scene warm                            # set every light to a scene (no name: list them)
+espsync-cli overwatch-hud                         # print what the Overwatch health reader sees
 ```
 
 GUI flags: `espsync --start --minimized` (start syncing straight away into the tray).

@@ -50,10 +50,11 @@ class Frame:
     `image` is float32 (h, w, 3).  1.0 is SDR reference white; HDR content may
     exceed 1.0 up to `peak` (also relative to SDR white).
 
-    `probe` is the screen's top-left corner at full resolution (same units,
+    `probe` is a small part of the screen at full resolution (same units,
     never tone-mapped), when the engine asked for it via
-    `CaptureBackend.probe_size` and the backend can provide it.  Game
-    integrations read pixel-sized signals there (see espsync.wow).
+    `CaptureBackend.probe_rect` and the backend can provide it.  Game
+    integrations read pixel-sized signals there (see espsync.wow and
+    espsync.overwatch).
     """
 
     image: np.ndarray
@@ -84,14 +85,25 @@ def bgra_to_linear(bgra: np.ndarray) -> np.ndarray:
     return SRGB_TO_LINEAR[bgra[..., 2::-1]]
 
 
+def clip_rect(rect: tuple[int, int, int, int], width: int, height: int) -> tuple[int, int, int, int] | None:
+    """`rect` (x, y, w, h) clipped to a width x height screen; None if nothing is left."""
+    x, y, w, h = (int(v) for v in rect)
+    x0, y0 = max(x, 0), max(y, 0)
+    x1, y1 = min(x + w, width), min(y + h, height)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return x0, y0, x1 - x0, y1 - y0
+
+
 class CaptureBackend(ABC):
     name = "base"
 
     def __init__(self, monitor: int = 0) -> None:
         self.monitor = monitor
-        # (width, height) of the full-resolution top-left corner to return as
-        # Frame.probe; None = not needed.  Set by the engine at any time.
-        self.probe_size: tuple[int, int] | None = None
+        # (x, y, width, height) in screen pixels of the full-resolution area to
+        # return as Frame.probe; None = not needed.  Set by the engine at any
+        # time; backends clip it to the screen.
+        self.probe_rect: tuple[int, int, int, int] | None = None
 
     @abstractmethod
     def grab(self, timeout_ms: int = 100) -> Frame | None:

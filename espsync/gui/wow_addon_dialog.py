@@ -1,4 +1,4 @@
-"""Settings -> Game effects -> "Install WoW addon…": copy the bundled addon into WoW."""
+"""Games tab -> "Install WoW addon…": copy the bundled addon into WoW."""
 
 from __future__ import annotations
 
