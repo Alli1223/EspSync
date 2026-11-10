@@ -71,6 +71,14 @@ for _ in $(seq 100); do
   ls "$XDG_RUNTIME_DIR"/wayland-? >/dev/null 2>&1 && break
   sleep 0.1
 done
+if ! ls "$XDG_RUNTIME_DIR"/wayland-? >/dev/null 2>&1; then
+  echo "sway did not start (see sway.log below)." >&2
+  if grep -q "Operation not permitted" "$logs/sway.log" 2>/dev/null; then
+    echo "In a container, Arch's sway can't keep its cap_sys_nice file capability:" >&2
+    echo "run 'setcap -r \"\$(command -v sway)\"' as root, or start the container with --cap-add=SYS_NICE." >&2
+  fi
+  exit 1
+fi
 WAYLAND_DISPLAY=$(basename "$(ls "$XDG_RUNTIME_DIR"/wayland-? | head -n 1)")
 export WAYLAND_DISPLAY
 dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR XDG_CONFIG_HOME

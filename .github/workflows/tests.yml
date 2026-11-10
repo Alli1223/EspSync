@@ -48,8 +48,17 @@ jobs:
           pacman -Syu --noconfirm --needed
           sway swaybg xdg-desktop-portal xdg-desktop-portal-wlr pipewire wireplumber dbus fuse3
           gstreamer gst-plugins-base gst-plugins-bad gst-plugin-pipewire
-          python python-gobject python-numpy python-platformdirs python-jeepney
+          python python-gobject python-numpy python-platformdirs python-jeepney libcap
       - name: Unprivileged user (sway won't run as root)
         run: useradd -m tester && chown -R tester "$GITHUB_WORKSPACE"
+      - name: Let sway start in a container
+        # Arch ships sway with the cap_sys_nice file capability (realtime
+        # scheduling). Docker's capability bounding set lacks CAP_SYS_NICE, so
+        # executing sway fails with "Operation not permitted". It runs fine
+        # without the capability.
+        run: |
+          getcap "$(command -v sway)" || true
+          setcap -r "$(command -v sway)" || true
+          runuser -u tester -- sway --version
       - name: Portal capture smoke test (headless Sway)
         run: runuser -u tester -- env SHOW_LOGS=1 bash scripts/wayland-smoke.sh
