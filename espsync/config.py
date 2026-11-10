@@ -172,6 +172,13 @@ class SyncSettings:
     # to the lights; Hue recommends streaming at 50-60 Hz to ride out UDP loss.
     hue_rate_hz: float = 50.0
     transition_ms: float = 0.0  # ESPHome transition per update (0 = immediate)
+    # Network load.  Hold back colour changes smaller than this share of full
+    # scale (0 = send every change); a held-back colour still goes out after a
+    # moment, so the lights settle on the exact value.
+    min_change: float = 0.0
+    # Ceiling on updates/second summed over every Wi-Fi light (native API and
+    # UDP): with many lights each one is slowed down to fit.  0 = no ceiling.
+    max_total_rate_hz: float = 0.0
     restore_on_stop: bool = True
 
     # Game effects (World of Warcraft + the EspSync addon, integrations/wow).

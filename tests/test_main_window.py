@@ -127,7 +127,7 @@ def test_overwatch_test_buttons_reach_the_engine(window):
 
 
 def test_tabs_and_status_pill(window):
-    assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == ["Light", "Picture", "Games", "Setup"]
+    assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == ["Light", "Picture", "Games", "Room"]
     window._tick_stats()
     assert window.state_pill.text() == "PREVIEW"
     window.sync_btn.setChecked(True)
@@ -147,3 +147,39 @@ def test_scene_menu_actions_pick_their_own_scene(window, monkeypatch):
     for action in menu.actions():
         action.trigger()
     assert chosen == list(window.scene_buttons)
+
+
+def test_settings_window_holds_light_output_and_updates(window):
+    panel = window.settings
+    assert not window.settings_dialog.isVisible()
+    window.open_settings()
+    assert window.settings_dialog.isVisible()
+    for widget in (panel.load_preset, panel.api_rate, panel.min_change, panel.check_now):
+        assert window.settings_dialog.isAncestorOf(widget)
+    window.settings_dialog.close()
+
+
+def test_network_load_presets(window):
+    panel, sync = window.settings, window.config.sync
+    assert panel.load_preset.currentIndex() == 0  # the defaults are "Responsive"
+    panel.load_preset.setCurrentIndex(2)  # Gentle on Wi-Fi
+    assert (sync.api_rate_hz, sync.udp_rate_hz, sync.hue_rate_hz) == (10.0, 25.0, 25.0)
+    assert sync.max_total_rate_hz == 60.0 and sync.min_change == pytest.approx(0.02)
+    assert sync.transition_ms == 100.0
+    assert panel.api_rate.value() == 10 and panel.min_change.value() == pytest.approx(2.0)
+    panel.api_rate.setValue(12)  # hand-tuned: no longer a preset
+    assert panel.load_preset.currentText() == "Custom" and sync.api_rate_hz == 12.0
+    panel.api_rate.setValue(10)
+    assert panel.load_preset.currentIndex() == 2
+
+
+def test_traffic_readout(window):
+    window.sync_btn.setChecked(True)
+    window.engine.stats.send_rate = 123.4
+    window.engine.stats.lights = {"a": "ready", "b": "ready"}
+    window._tick_stats()
+    assert window.settings.traffic.text() == "123 updates/s to 2 lights"
+    assert "123 updates/s" in window.status_label.text()
+    window.sync_btn.setChecked(False)
+    window._tick_stats()
+    assert "stopped" in window.settings.traffic.text()

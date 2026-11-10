@@ -35,7 +35,7 @@ from .devices_dialog import DevicesDialog
 from .light_panel import EntityChoice, LightPanel
 from .room_view import RoomView
 from .screen_view import ScreenView
-from .settings_panel import SettingsPanel
+from .settings_panel import SettingsDialog, SettingsPanel
 from .tasks import run_async
 from .theme import C, restyle, set_kind, set_role, swatch
 from .updates import UpdateManager
@@ -108,6 +108,10 @@ class MainWindow(QMainWindow):
         devices.setToolTip("ESPHome devices and Philips Hue bridges")
         devices.clicked.connect(lambda: self.open_devices())
         bar.addWidget(devices)
+        settings_btn = QPushButton("Settings…")
+        settings_btn.setToolTip("Update rates and network load for all lights, app updates")
+        settings_btn.clicked.connect(self.open_settings)
+        bar.addWidget(settings_btn)
 
         # ---------------------------------------------------------- status bar
         status = self.statusBar()
@@ -177,6 +181,7 @@ class MainWindow(QMainWindow):
         self.light_panel.refreshHueRequested.connect(self.fetch_hue_area)
         self.settings = SettingsPanel(config, self)
         self.settings.changed.connect(self._on_settings)
+        self.settings_dialog = SettingsDialog(self.settings, self)
         tabs = self.tabs = QTabWidget()
         tabs.setDocumentMode(True)
         tabs.addTab(self.light_panel, "Light")
@@ -241,6 +246,7 @@ class MainWindow(QMainWindow):
         self.tray_toggle = menu.addAction("Start sync", lambda: self.sync_btn.toggle())
         self.add_scene_actions(menu.addMenu("Scene"))
         menu.addAction("Show window", self._show_window)
+        menu.addAction("Settings…", self.open_settings)
         menu.addAction("Check for updates", lambda: self.updates.check(manual=True))
         menu.addSeparator()
         # close() (not QApplication.quit) so closeEvent restores the lights and saves.
@@ -497,6 +503,13 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             self.statusBar().showMessage(f"Could not save config: {exc}", 5000)
 
+    # ------------------------------------------------------------ settings
+    def open_settings(self) -> None:
+        """The Settings window: network load for all lights, updates.  It stays open beside the main window."""
+        self.settings_dialog.show()
+        self.settings_dialog.raise_()
+        self.settings_dialog.activateWindow()
+
     # ------------------------------------------------------------- devices
     def open_devices(self, tab: str = "esphome") -> None:
         dlg = DevicesDialog(self.config, self, tab)
@@ -684,8 +697,10 @@ class MainWindow(QMainWindow):
         if st.backend:
             parts.append(f"{st.backend.upper()}{' · HDR' if st.hdr else ''}")
         parts.append(f"screen {st.capture_fps:.0f} fps")
+        self.settings.show_traffic(st.send_rate if self.engine.sending else None, len(st.lights))
         if self.engine.sending:
             parts.append(f"capture→send {st.latency_ms:.1f} ms")
+            parts.append(f"{st.send_rate:.0f} updates/s")
             errors = [f"{self.config.light(k).name}: {v}" for k, v in st.lights.items()
                       if v != "ready" and self.config.light(k)]
             ready = sum(1 for v in st.lights.values() if v == "ready")

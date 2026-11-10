@@ -15,6 +15,8 @@ import numpy as np
 
 from ..config import LightConfig, SyncSettings
 
+SETTLE_S = 0.5  # a change smaller than SyncSettings.min_change is sent after this long anyway
+
 
 class LightOutput(ABC):
     keepalive_s: float | None = None  # resend unchanged colours this often (UDP effects time out)
@@ -69,6 +71,8 @@ class LightOutput(ABC):
         if payload == self._last_payload:
             if self.keepalive_s is None or now - self._last_send < self.keepalive_s:
                 return
+        elif now - self._last_send < SETTLE_S and self._small_change(payload):
+            return  # the engine submits every frame, so this is retried
         try:
             self.transmit(colors, payload)
         except Exception as exc:  # noqa: BLE001 - keep the sync loop alive
@@ -77,6 +81,15 @@ class LightOutput(ABC):
         self._last_payload = payload
         self._last_send = now
         self.sent += 1
+
+    def _small_change(self, payload: bytes) -> bool:
+        """True when no channel moved more than `min_change` since the last send."""
+        limit = int(self.settings.min_change * 255.0 + 0.5)
+        last = self._last_payload
+        if limit <= 0 or last is None or len(last) != len(payload):
+            return False
+        a = np.frombuffer(payload, np.uint8).astype(np.int16)
+        return int(np.abs(a - np.frombuffer(last, np.uint8)).max(initial=0)) <= limit
 
     @abstractmethod
     def encode(self, colors: np.ndarray) -> bytes:

@@ -114,3 +114,46 @@ def test_udp_output_sends_wled_datagram():
     data, blank = asyncio.run(run())
     assert data == bytes((2, 2, 255, 0, 0, 0, 0, 255))
     assert blank == bytes((2, 2, 0, 0, 0, 0, 0, 0))
+
+
+def test_small_changes_are_held_back_then_settle(monkeypatch):
+    import espsync.lights.base as base
+
+    monkeypatch.setattr(base, "SETTLE_S", 0.15)
+
+    async def run():
+        out = _Recorder(rate=200)
+        out.settings.min_change = 0.02  # 5 of 255
+        await out.start()
+        level = lambda v: np.full((1, 3), v / 255, np.float32)  # noqa: E731
+        out.submit(level(100))
+        await asyncio.sleep(0.02)
+        out.submit(level(103))  # small: held back
+        await asyncio.sleep(0.02)
+        out.submit(level(120))  # big: sent at once
+        await asyncio.sleep(0.02)
+        out.submit(level(122))  # small again
+        held = list(out.sent_payloads)
+        await asyncio.sleep(0.2)
+        out.submit(level(122))  # ...but still there after the settle time: sent
+        return held, out.sent_payloads
+
+    held, sent = asyncio.run(run())
+    assert held == [bytes((100,) * 3), bytes((120,) * 3)]
+    assert sent == [*held, bytes((122,) * 3)]
+
+
+def test_total_cap_slows_wifi_lights_only():
+    from espsync.engine import apply_total_cap
+    from espsync.lights.base import VirtualOutput
+
+    s = SyncSettings()
+    strips = [UdpOutput(LightConfig(transport="wled"), s, "127.0.0.1") for _ in range(4)]  # 60 Hz each
+    virtual = VirtualOutput(LightConfig(transport="virtual"), s, 60)
+    apply_total_cap([*strips, virtual], 0)  # no limit
+    assert strips[0].interval == pytest.approx(1 / 60)
+    apply_total_cap([*strips, virtual], 100)  # 4 lights share 100 updates/s
+    assert [o.interval for o in strips] == pytest.approx([1 / 25] * 4)
+    assert virtual.interval == pytest.approx(1 / 60)
+    apply_total_cap(strips, 1000)  # a generous limit never speeds a light up
+    assert strips[0].interval == pytest.approx(1 / 25)
