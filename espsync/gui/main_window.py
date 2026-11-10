@@ -239,10 +239,7 @@ class MainWindow(QMainWindow):
         tray = QSystemTrayIcon(icon, self)
         menu = QMenu()
         self.tray_toggle = menu.addAction("Start sync", lambda: self.sync_btn.toggle())
-        scenes = menu.addMenu("Scene")
-        for scene in SCENES:
-            scenes.addAction(QIcon(self._scene_swatch(scene)), scene.name,
-                             lambda sid=scene.id: self.apply_scene(sid))
+        self.add_scene_actions(menu.addMenu("Scene"))
         menu.addAction("Show window", self._show_window)
         menu.addAction("Check for updates", lambda: self.updates.check(manual=True))
         menu.addSeparator()
@@ -291,6 +288,12 @@ class MainWindow(QMainWindow):
             return swatch((0.16, 0.17, 0.2))
         level = 0.45 + 0.55 * scene.brightness  # dim scenes still read as their colour
         return swatch(tuple(c * level for c in scene.rgb))
+
+    def add_scene_actions(self, menu: QMenu) -> None:
+        for scene in SCENES:
+            # The action passes its "checked" flag to the first parameter.
+            menu.addAction(QIcon(self._scene_swatch(scene)), scene.name,
+                           lambda _=False, sid=scene.id: self.apply_scene(sid))
 
     def apply_scene(self, scene_id: str) -> None:
         """Stop syncing (if running) and set every light to a preset scene."""

@@ -135,3 +135,15 @@ def test_tabs_and_status_pill(window):
     window.engine.stats.error = "capture: lost"
     window._tick_stats()
     assert window.state_pill.text() == "CAPTURE ERROR"
+
+
+def test_scene_menu_actions_pick_their_own_scene(window, monkeypatch):
+    from PySide6.QtWidgets import QMenu
+
+    chosen = []
+    monkeypatch.setattr(window, "apply_scene", chosen.append)
+    menu = QMenu()
+    window.add_scene_actions(menu)
+    for action in menu.actions():
+        action.trigger()
+    assert chosen == list(window.scene_buttons)
