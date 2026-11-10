@@ -12,6 +12,8 @@
     espsync-cli monitors                 # list displays (and HDR state)
     espsync-cli bench                    # measure capture + processing speed
     espsync-cli run                      # sync until Ctrl+C
+    espsync-cli scene warm               # set every light to a preset scene
+    espsync-cli overwatch-hud            # check the Overwatch health-bar reader
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from .config import (
     save_config,
 )
 from .mapping import SCREEN_PRESETS
+from .scenes import SCENES
 
 BACKEND_CHOICES = ["auto", "dxgi", "mss"]
 
@@ -403,6 +406,58 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_scene(args: argparse.Namespace) -> int:
+    from .scenes import SCENES, apply_scene, scene_by_id
+
+    if not args.scene:
+        for sc in SCENES:
+            detail = f"{sc.kelvin} K, {sc.brightness * 100:.0f}%" if sc.on else "lights off"
+            print(f"{sc.id:10} {sc.name:14} {detail}")
+        return 0
+    scene = scene_by_id(args.scene)
+    assert scene is not None  # argparse checked the choice
+    result = asyncio.run(apply_scene(load_config(_cfg_path(args)), scene))
+    print(result.summary(scene))
+    return 1 if result.errors and not result.applied else 0
+
+
+def cmd_overwatch_hud(args: argparse.Namespace) -> int:
+    """Watch the screen and print what the Overwatch health-bar reader sees."""
+    from . import overwatch
+    from .capture import create_backend
+
+    cfg = load_config(_cfg_path(args))
+    if args.monitor is not None:
+        cfg.sync.monitor = args.monitor
+    backend = create_backend(cfg.sync)
+    reader = overwatch.HudReader()
+    size = None
+    last = ""
+    t_end = time.perf_counter() + args.seconds
+    print("Looking for the Overwatch health bar (play with the HUD on screen)...")
+    try:
+        while time.perf_counter() < t_end:
+            backend.probe_rect = overwatch.probe_rect(size) if size else None
+            frame = backend.grab(100)
+            if frame is None:
+                continue
+            size = frame.source_size
+            sig = reader.read(frame.probe, size, frame.timestamp)
+            if sig is None:
+                text = "health bar not found" if reader.lock is None else "health bar not visible"
+            else:
+                x0, y0, pw, _ph = overwatch.probe_rect(size)
+                y = y0 + sig.row + overwatch.BAR_SLOPE * (pw - 1 - sig.x)
+                text = (f"health {sig.health * 100:3.0f}%   (bar starts at x={(x0 + sig.x) / size[1]:.3f} h, "
+                        f"y={y / size[1]:.3f} h on a {size[0]}x{size[1]} screen)")
+            if text != last:
+                print(f"{time.strftime('%H:%M:%S')}  {text}")
+                last = text
+    finally:
+        backend.close()
+    return 0
+
+
 def cmd_bench(args: argparse.Namespace) -> int:
     import numpy as np
 
@@ -556,6 +611,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--fps", type=int)
     s.add_argument("--monitor", type=int)
     s.set_defaults(func=cmd_run)
+
+    s = sub.add_parser("scene", help="set every light to a preset scene (no argument: list them)")
+    s.add_argument("scene", nargs="?", choices=[sc.id for sc in SCENES])
+    s.set_defaults(func=cmd_scene)
+
+    s = sub.add_parser("overwatch-hud", help="print what the Overwatch health-bar reader sees on screen")
+    s.add_argument("--seconds", type=float, default=30.0)
+    s.add_argument("--monitor", type=int)
+    s.set_defaults(func=cmd_overwatch_hud)
 
     s = sub.add_parser("bench", help="benchmark capture + colour processing")
     s.add_argument("--seconds", type=float, default=3.0)

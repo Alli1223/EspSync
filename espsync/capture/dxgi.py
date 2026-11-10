@@ -26,7 +26,7 @@ from ctypes import POINTER, byref, c_float, c_int64, c_uint, c_uint32, c_void_p,
 
 import numpy as np
 
-from .base import TARGET_WIDTH, CaptureBackend, CaptureError, Frame, MonitorInfo, bgra_to_linear
+from .base import TARGET_WIDTH, CaptureBackend, CaptureError, Frame, MonitorInfo, bgra_to_linear, clip_rect
 
 if sys.platform != "win32":  # pragma: no cover - import guard
     raise ImportError("DXGI capture is only available on Windows")
@@ -479,7 +479,7 @@ class DxgiBackend(CaptureBackend):
         self._srv: Com | None = None
         self._staging: Com | None = None
         self._tex_key: tuple | None = None
-        self._probe_tex: Com | None = None  # full-resolution top-left corner (Frame.probe)
+        self._probe_tex: Com | None = None  # full-resolution probe area (Frame.probe)
         self._probe_key: tuple | None = None
         self._level = 0
         self._small = (0, 0)
@@ -590,11 +590,14 @@ class DxgiBackend(CaptureBackend):
         self._tex_key = (w, h, fmt)
 
     def _queue_probe(self, frame_tex: Com, desc: D3D11_TEXTURE2D_DESC) -> tuple[int, int] | None:
-        """Copy the top-left corner at full resolution into its own staging texture."""
+        """Copy the probe area at full resolution into its own staging texture."""
         assert self._device is not None and self._ctx is not None and self._out is not None
-        if not self.probe_size or self._out.rotation not in (0, DXGI_MODE_ROTATION_IDENTITY):
-            return None  # rotated: the texture's corner isn't the screen's top-left
-        pw, ph = min(self.probe_size[0], desc.Width), min(self.probe_size[1], desc.Height)
+        if not self.probe_rect or self._out.rotation not in (0, DXGI_MODE_ROTATION_IDENTITY):
+            return None  # rotated: texture coordinates aren't screen coordinates
+        rect = clip_rect(self.probe_rect, desc.Width, desc.Height)
+        if rect is None:
+            return None
+        px, py, pw, ph = rect
         key = (pw, ph, desc.Format)
         if self._probe_key != key:
             if self._probe_tex is not None:
@@ -611,7 +614,7 @@ class DxgiBackend(CaptureBackend):
             self._probe_tex = Com(pt.value)
             self._probe_key = key
         assert self._probe_tex is not None
-        box = D3D11_BOX(0, 0, 0, pw, ph, 1)
+        box = D3D11_BOX(px, py, 0, px + pw, py + ph, 1)
         copy_args = (c_void_p, c_uint, c_uint, c_uint, c_uint, c_void_p, c_uint, c_void_p)
         self._ctx.void(46, copy_args, self._probe_tex.ptr, 0, 0, 0, 0, frame_tex.ptr, 0, ctypes.addressof(box))
         return pw, ph

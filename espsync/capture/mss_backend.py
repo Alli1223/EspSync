@@ -11,7 +11,7 @@ import time
 
 import numpy as np
 
-from .base import TARGET_WIDTH, CaptureBackend, CaptureError, Frame, MonitorInfo, bgra_to_linear
+from .base import TARGET_WIDTH, CaptureBackend, CaptureError, Frame, MonitorInfo, bgra_to_linear, clip_rect
 
 
 def list_monitors() -> list[MonitorInfo]:
@@ -73,9 +73,10 @@ class MssBackend(CaptureBackend):
         step = max(1, w // TARGET_WIDTH)
         small = raw[step // 2 :: step, step // 2 :: step]
         probe = None
-        if self.probe_size:
-            pw, ph = self.probe_size
-            probe = bgra_to_linear(raw[:ph, :pw])
+        rect = clip_rect(self.probe_rect, w, h) if self.probe_rect else None
+        if rect is not None:
+            px, py, pw, ph = rect
+            probe = bgra_to_linear(raw[py : py + ph, px : px + pw])
         return Frame(image=bgra_to_linear(small), source_size=(w, h), probe=probe)
 
     def close(self) -> None:

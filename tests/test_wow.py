@@ -418,20 +418,22 @@ class FakeGameBackend:
     background = np.array([0.05, 0.3, 0.05], np.float32)
 
     def __init__(self) -> None:
-        self.probe_size = None
+        self.probe_rect = None
         self.health = 1.0
         self.levelups = 0
         self.probe_requests: list = []
 
     def grab(self, timeout_ms=100):
         time.sleep(0.01)
-        self.probe_requests.append(self.probe_size)
+        self.probe_requests.append(self.probe_rect)
         image = np.empty((90, 160, 3), np.float32)
         image[...] = self.background
         image[0, :8] = 0.75 * self.background + 0.25 * np.array([1, 0, 1], np.float32)
         probe = None
-        if self.probe_size:
-            probe = corner(linear_strip(self.health, self.levelups), background=self.background, size=self.probe_size)
+        if self.probe_rect:
+            assert self.probe_rect[:2] == (0, 0)
+            probe = corner(linear_strip(self.health, self.levelups), background=self.background,
+                           size=self.probe_rect[2:])
         return Frame(image=image, source_size=(1920, 1080), probe=probe)
 
     def close(self):
@@ -449,7 +451,10 @@ def game_engine(monkeypatch):
         running = True
 
         def __init__(self, names, *args, **kwargs):
-            assert "wow.exe" in names and "wowclassic.exe" in names
+            if "overwatch.exe" in names:
+                self.running = False  # only WoW "runs" here; the class attribute is WoW's
+            else:
+                assert "wow.exe" in names and "wowclassic.exe" in names
 
         def start(self):
             pass
@@ -487,7 +492,7 @@ def test_engine_keeps_the_strip_out_of_the_light_colours(game_engine):
     assert wait_for(lambda: "corner" in engine.colors())
     time.sleep(0.1)
     np.testing.assert_allclose(engine.colors()["corner"][0], background_srgb(), atol=1e-4)
-    assert backend.probe_requests[-1] == PROBE_SIZE
+    assert backend.probe_requests[-1] == (0, 0, *PROBE_SIZE)
 
 
 def test_engine_ignores_the_corner_while_the_game_is_not_running(game_engine):

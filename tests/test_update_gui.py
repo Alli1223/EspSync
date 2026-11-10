@@ -46,8 +46,5 @@ def test_settings_update_toggles(app):
     assert cfg.updates.check_automatically is False and "updates" in kinds
     asked = []
     panel.checkUpdatesRequested.connect(lambda: asked.append(1))
-    panel.findChild(type(panel.update_check).__mro__[0])  # noqa: B018 - widgets exist
-    from PySide6.QtWidgets import QPushButton
-
-    next(b for b in panel.findChildren(QPushButton) if b.text() == "Check now").click()
+    panel.check_now.click()
     assert asked == [1]

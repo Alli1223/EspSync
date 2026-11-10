@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 from ..config import AppConfig, LightConfig
 from ..mapping import Region, light_regions, normalise_region
 from .room_view import IDLE, qcolor
+from .theme import C
 
 
 class ScreenView(QWidget):
@@ -94,14 +95,16 @@ class ScreenView(QWidget):
     def paintEvent(self, event) -> None:  # noqa: ANN001
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), QColor(18, 18, 22))
+        p.setPen(QPen(QColor(C.border), 1))
+        p.setBrush(QColor(C.canvas))
+        p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
         pic = self._picture()
         if self.image is not None:
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             p.drawImage(pic, self.image)
         else:
-            p.fillRect(pic, QColor(30, 30, 36))
-            p.setPen(QColor(140, 140, 150))
+            p.fillRect(pic, QColor(C.surface))
+            p.setPen(QColor(C.muted))
             p.drawText(pic, Qt.AlignmentFlag.AlignCenter, "Waiting for screen capture…")
         p.fillRect(pic, QColor(0, 0, 0, 70))  # dim so the overlays read clearly
 

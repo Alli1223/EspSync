@@ -435,5 +435,5 @@ def test_settings_button_opens_the_dialog(app, monkeypatch):
     panel = settings_panel.SettingsPanel(AppConfig())
     assert panel.install_addon.text() == "Install WoW addon…"
     panel.install_addon.click()
-    assert opened == [panel, "exec"]
+    assert opened == [panel.install_addon.window(), "exec"]  # parented to the window the button is in
     panel.deleteLater()

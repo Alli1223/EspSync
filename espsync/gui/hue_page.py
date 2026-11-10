@@ -166,7 +166,7 @@ class HuePage(QWidget):
         col.addLayout(head)
         self.area_status = QLabel(AREA_HELP)
         self.area_status.setWordWrap(True)
-        self.area_status.setStyleSheet("color: #999;")
+        self.area_status.setProperty("role", "hint")
         col.addWidget(self.area_status)
         self.channels = QListWidget()
         col.addWidget(self.channels, 1)

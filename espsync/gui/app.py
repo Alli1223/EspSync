@@ -9,10 +9,11 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPalette, QPixmap, QRadialGradient
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap, QRadialGradient
 from PySide6.QtWidgets import QApplication
 
 from ..config import APP_NAME, load_config
+from . import theme
 
 ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
 
@@ -70,26 +71,6 @@ def _setup_logging(verbose: bool) -> Path | None:
     return path
 
 
-def dark_palette() -> QPalette:
-    pal = QPalette()
-    base, alt, text = QColor(30, 30, 35), QColor(40, 40, 46), QColor(225, 225, 230)
-    pal.setColor(QPalette.ColorRole.Window, base)
-    pal.setColor(QPalette.ColorRole.WindowText, text)
-    pal.setColor(QPalette.ColorRole.Base, QColor(22, 22, 26))
-    pal.setColor(QPalette.ColorRole.AlternateBase, alt)
-    pal.setColor(QPalette.ColorRole.ToolTipBase, alt)
-    pal.setColor(QPalette.ColorRole.ToolTipText, text)
-    pal.setColor(QPalette.ColorRole.Text, text)
-    pal.setColor(QPalette.ColorRole.Button, alt)
-    pal.setColor(QPalette.ColorRole.ButtonText, text)
-    pal.setColor(QPalette.ColorRole.Highlight, QColor(45, 108, 223))
-    pal.setColor(QPalette.ColorRole.HighlightedText, QColor("white"))
-    pal.setColor(QPalette.ColorRole.PlaceholderText, QColor(120, 120, 128))
-    for role in (QPalette.ColorRole.Text, QPalette.ColorRole.ButtonText, QPalette.ColorRole.WindowText):
-        pal.setColor(QPalette.ColorGroup.Disabled, role, QColor(110, 110, 118))
-    return pal
-
-
 def _single_instance():  # noqa: ANN202 - returns QLocalServer | None
     """Make sure only one EspSync drives the lights per config file.
 
@@ -134,8 +115,7 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication([sys.argv[0], *qt_args])
     app.setApplicationName(APP_NAME)
-    app.setStyle("Fusion")
-    app.setPalette(dark_palette())
+    theme.apply(app)
     icon = make_icon()
     app.setWindowIcon(icon)
 
