@@ -29,6 +29,7 @@ from .color import ColorProcessor, Smoother, linear_to_srgb
 from .config import AppConfig, LightConfig
 from .effects import GameEffects, element_angles
 from .lights import ApiLightOutput, EffectController, EspHomeDevice, LightOutput, UdpOutput, VirtualOutput
+from .lights.hue import HueEntertainmentStream, HueLightOutput
 from .mapping import DEFAULT_ASPECT, light_regions
 from .procwatch import ProcessWatcher
 from .wow import PROBE_SIZE, PROCESS_NAMES, decode_signal, hide_strip
@@ -49,6 +50,7 @@ class EngineStats:
     error: str | None = None
     lights: dict[str, str] = field(default_factory=dict)  # light id -> status text
     game: str = ""  # game integration status, "" while no supported game runs
+    streams: dict[str, str] = field(default_factory=dict)  # Hue bridge name -> "streaming 50 Hz" / error
 
 
 class _NetLoop:
@@ -90,6 +92,7 @@ class SyncEngine:
         self._capture_thread: threading.Thread | None = None
         self._running = threading.Event()
         self._generation = 0  # bumped per start(); a stale capture thread sees it and exits
+        self._restarting = False  # stop() is half of restart(): keep Hue areas streaming
         self._lock = threading.Lock()
         self._regions_dirty = True
         self._colors: dict[str, np.ndarray] = {}
@@ -100,6 +103,7 @@ class SyncEngine:
 
         # network-loop state
         self._devices: dict[str, EspHomeDevice] = {}
+        self._hue: dict[str, HueEntertainmentStream] = {}  # HueBridgeConfig.id -> stream
         self._outputs: dict[str, LightOutput] = {}
         self._effects: list[EffectController] = []
         self._zeroconf = None
@@ -169,7 +173,11 @@ class SyncEngine:
     def restart(self) -> None:
         if self.running:
             send = self.sending
-            self.stop(restore=False)
+            self._restarting = True
+            try:
+                self.stop(restore=False)
+            finally:
+                self._restarting = False
             self.start(send=send)
 
     def colors(self) -> dict[str, np.ndarray]:
@@ -196,13 +204,20 @@ class SyncEngine:
             out[lid] = o.status_text()
         return out
 
+    def stream_status(self) -> dict[str, str]:
+        return {s.bridge.name or s.bridge.host: s.status_text() for s in list(self._hue.values())}
+
     # ----------------------------------------------------------- network side
     async def _start_outputs(self) -> None:
         from zeroconf.asyncio import AsyncZeroconf
 
         cfg = self.config
         lights = [l for l in cfg.lights if l.enabled]
-        needed = {l.device_id for l in lights if l.device_id and (l.transport == "api" or l.udp_effect or not l.udp_host)}
+        needed = {
+            l.device_id for l in lights
+            if l.device_id and l.transport in ("api", "wled", "e131")
+            and (l.transport == "api" or l.udp_effect or not l.udp_host)
+        }
         if needed and self._zeroconf is None:
             self._zeroconf = AsyncZeroconf()
         for dev_id in needed:
@@ -212,6 +227,13 @@ class SyncEngine:
             dev = EspHomeDevice(dcfg, self._zeroconf)
             self._devices[dev_id] = dev
             await dev.start()
+        # Hue: one Entertainment stream per bridge; it connects in the background.
+        for bridge_id in {l.hue_bridge for l in lights if l.transport == "hue" and l.hue_bridge}:
+            bcfg = cfg.hue_bridge(bridge_id)
+            if bcfg is not None and bcfg.paired:
+                stream = HueEntertainmentStream(bcfg, cfg.sync)
+                self._hue[bridge_id] = stream
+                stream.start()
 
         for light in lights:
             self._outputs[light.id] = self._make_output(light)
@@ -228,6 +250,14 @@ class SyncEngine:
             return ApiLightOutput(light, s, dev)
         if light.transport in ("wled", "e131"):
             return UdpOutput(light, s, light.udp_host)
+        if light.transport == "hue":
+            stream = self._hue.get(light.hue_bridge)
+            if stream is None:
+                out = VirtualOutput(light, s, 60)
+                bridge = self.config.hue_bridge(light.hue_bridge)
+                out.error = "no Hue bridge selected" if bridge is None else "Hue bridge not paired"
+                return out
+            return HueLightOutput(light, s, stream)
         return VirtualOutput(light, s, 60)
 
     async def _start_one(self, light: LightConfig) -> None:
@@ -263,6 +293,14 @@ class SyncEngine:
                 await ctl.stop(restore)
             except Exception:  # noqa: BLE001
                 log.exception("restoring effect")
+        # Hue: close the DTLS session, end the stream and put the lights back.
+        # On a restart the area stays active so the lights hold their colour
+        # until the new session takes over.
+        keep = self._restarting
+        await asyncio.gather(
+            *(s.stop(deactivate=not keep, restore=restore and not keep) for s in self._hue.values()),
+            return_exceptions=True,
+        )
         await asyncio.sleep(0.15)  # let final commands leave the socket
         for dev in self._devices.values():
             await dev.stop()
@@ -271,6 +309,7 @@ class SyncEngine:
             self._zeroconf = None
         self._outputs.clear()
         self._devices.clear()
+        self._hue.clear()
         self._effects.clear()
 
     def _deliver(self) -> None:
@@ -435,6 +474,7 @@ class SyncEngine:
                     self.stats.capture_fps = frame_count / (now - rate_t0)
                     self.stats.loop_fps = loop_count / (now - rate_t0)
                     self.stats.lights = self.light_status()
+                    self.stats.streams = self.stream_status()
                     self.stats.game = f"WoW: {effects.status_text()}" if game else ""
                     frame_count = loop_count = 0
                     rate_t0 = now

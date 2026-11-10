@@ -1,4 +1,4 @@
-"""Manage ESPHome devices: discover, add (with encryption key), test, import lights."""
+"""Manage devices: ESPHome (discover, add with encryption key, test, import lights) and Philips Hue bridges."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
 from ..config import AppConfig, DeviceConfig
 from ..discovery import DiscoveredDevice, discover
 from ..lights.esphome import probe_device
+from .hue_page import HuePage
 from .tasks import run_async
 
 KEY_HELP = (
@@ -123,13 +125,18 @@ class DeviceEditDialog(QDialog):
 class DevicesDialog(QDialog):
     devicesChanged = Signal()
     importLights = Signal(str)  # device id
+    hueLightsImported = Signal(object)  # list[LightConfig]
 
-    def __init__(self, config: AppConfig, parent: QWidget | None = None) -> None:
+    def __init__(self, config: AppConfig, parent: QWidget | None = None, tab: str = "esphome") -> None:
         super().__init__(parent)
         self.config = config
-        self.setWindowTitle("ESPHome devices")
-        self.resize(760, 560)
-        col = QVBoxLayout(self)
+        self.setWindowTitle("Devices")
+        self.resize(780, 620)
+        outer = QVBoxLayout(self)
+        self.tabs = QTabWidget()
+        outer.addWidget(self.tabs, 1)
+        esphome = QWidget()
+        col = QVBoxLayout(esphome)
 
         col.addWidget(QLabel("<b>Your devices</b>"))
         self.table = QTableWidget(0, 3)
@@ -169,13 +176,24 @@ class DevicesDialog(QDialog):
         r2 = QHBoxLayout()
         r2.addWidget(add_found)
         r2.addStretch(1)
+        col.addLayout(r2)
+
+        self.hue = HuePage(config)
+        self.hue.bridgesChanged.connect(self.devicesChanged)
+        self.hue.lightsImported.connect(self.hueLightsImported)
+        self.tabs.addTab(esphome, "ESPHome")
+        self.tabs.addTab(self.hue, "Philips Hue")
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
         close = QPushButton("Close")
         close.clicked.connect(self.accept)
-        r2.addWidget(close)
-        col.addLayout(r2)
+        bottom.addWidget(close)
+        outer.addLayout(bottom)
 
         self._refresh()
         self._scan()
+        if tab == "hue":
+            self.tabs.setCurrentWidget(self.hue)
 
     def _refresh(self) -> None:
         self.table.setRowCount(0)

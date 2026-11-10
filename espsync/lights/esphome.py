@@ -196,6 +196,7 @@ class ApiLightOutput(LightOutput):
         self.mode: int | None = None
         self._is_off = False
         self._last_hue = (1.0, 1.0, 1.0)
+        self._effect_cleared = False
 
     def _resolve(self) -> bool:
         info = self.device.find_light(self.cfg.entity)
@@ -269,8 +270,24 @@ class ApiLightOutput(LightOutput):
             if self.mode & LightColorCapability.COLD_WARM_WHITE:
                 kwargs["cold_white"] = 0.0
                 kwargs["warm_white"] = 0.0
+        if self._effect_running():
+            # A running effect (rainbow, pulse, ...) keeps painting over the
+            # colours we send, so switch it off; stop() puts it back.
+            kwargs["effect"] = "None"
+            self._effect_cleared = True
         self.device.client.light_command(self.info.key, **kwargs)
         self._is_off = False
+
+    def _effect_running(self) -> bool:
+        """True until we've switched the light's effect off (and again if
+        something else, e.g. Home Assistant, turns one on during sync)."""
+        if self.info is None or not self.info.effects:
+            return False
+        if not self._effect_cleared:
+            return True
+        state = self.device.states.get(self.info.key)
+        effect = (state.effect if state is not None else "") or ""
+        return effect.lower() not in ("", "none")
 
     async def stop(self, restore: bool) -> None:
         await super().stop(restore)
