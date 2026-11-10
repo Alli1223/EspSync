@@ -321,8 +321,8 @@ def test_stream_is_latest_wins_at_the_rate_limit():
         for i in range(40):  # 40 frames, much faster than 20 Hz
             out.submit(np.array([[i / 39, 0.0, 0.0]]))
             await asyncio.sleep(0.005)
-        elapsed = loop.time() - t0
         await asyncio.sleep(0.08)  # let the pending (newest) frame go out
+        elapsed = loop.time() - t0  # including that wait: packets go out during it too
         sent = transports[0].sent
         assert 2 <= len(sent) <= elapsed * 20 + 3 and len(sent) < 40
         assert _channels(sent[-1])[0] == (65535, 0, 0)  # the newest colour wins
