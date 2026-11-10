@@ -53,6 +53,7 @@ class EngineStats:
     lights: dict[str, str] = field(default_factory=dict)  # light id -> status text
     game: str = ""  # game integration status, "" while no supported game runs
     streams: dict[str, str] = field(default_factory=dict)  # Hue bridge name -> "streaming 50 Hz" / error
+    send_rate: float = 0.0  # updates/second going out to all lights and bridges together
 
 
 class _NetLoop:
@@ -84,6 +85,20 @@ def _set_timer_resolution(enable: bool) -> None:
         (winmm.timeBeginPeriod if enable else winmm.timeEndPeriod)(1)
     except OSError:
         pass
+
+
+def wifi_outputs(outputs) -> list[LightOutput]:  # noqa: ANN001
+    """The outputs that send to each light on their own (Hue lights share a bridge stream)."""
+    return [o for o in outputs if isinstance(o, (ApiLightOutput, UdpOutput))]
+
+
+def apply_total_cap(outputs, max_total_hz: float) -> None:  # noqa: ANN001
+    """Slow every Wi-Fi light down so that together they stay under `max_total_hz` updates/second."""
+    wifi = wifi_outputs(outputs)
+    if max_total_hz > 0 and wifi:
+        floor = len(wifi) / max_total_hz
+        for out in wifi:
+            out.interval = max(out.interval, floor)
 
 
 class SyncEngine:
@@ -220,6 +235,12 @@ class SyncEngine:
             out[lid] = o.status_text()
         return out
 
+    def sent_total(self) -> int:
+        """Updates sent since the outputs started: per Wi-Fi light, plus Hue stream packets."""
+        return sum(o.sent for o in wifi_outputs(list(self._outputs.values()))) + sum(
+            s.sent for s in list(self._hue.values())
+        )
+
     def stream_status(self) -> dict[str, str]:
         return {s.bridge.name or s.bridge.host: s.status_text() for s in list(self._hue.values())}
 
@@ -253,6 +274,7 @@ class SyncEngine:
 
         for light in lights:
             self._outputs[light.id] = self._make_output(light)
+        apply_total_cap(self._outputs.values(), cfg.sync.max_total_rate_hz)
         await asyncio.gather(*(self._start_one(l) for l in lights), return_exceptions=True)
 
     def _make_output(self, light: LightConfig) -> LightOutput:
@@ -389,6 +411,7 @@ class SyncEngine:
         last_tick = time.perf_counter()
         frame_count = loop_count = 0
         rate_t0 = last_tick
+        sent_before = self.sent_total()
         retry_at = 0.0
 
         try:
@@ -519,6 +542,9 @@ class SyncEngine:
                     self.stats.loop_fps = loop_count / (now - rate_t0)
                     self.stats.lights = self.light_status()
                     self.stats.streams = self.stream_status()
+                    sent = self.sent_total()
+                    self.stats.send_rate = max(0, sent - sent_before) / (now - rate_t0)
+                    sent_before = sent
                     if game == "wow":
                         self.stats.game = f"WoW: {effects.status_text()}"
                     elif game == "overwatch":

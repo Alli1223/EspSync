@@ -447,5 +447,5 @@ def test_settings_round_trip_and_panel(app):
     for button in panel.ow_tests.values():
         button.click()
     assert tests == ["ow:damage", "ow:heal", "ow:lowhealth", "ow:elimination"]
-    assert [title for title, _ in panel.pages] == ["Picture", "Games", "Setup"]
+    assert [title for title, _ in panel.pages] == ["Picture", "Games", "Room"]
     panel.deleteLater()

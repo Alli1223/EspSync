@@ -1,4 +1,5 @@
-"""Global sync / capture / game / room settings, as pages for the main window's tabs."""
+"""Global settings: capture / game / room pages for the main window's tabs, and
+the Settings window (light output for all lights, updates)."""
 
 from __future__ import annotations
 
@@ -6,6 +7,8 @@ from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
@@ -32,6 +35,17 @@ BACKEND_LABELS = {
 WOW_HELP_URL = "https://github.com/Alli1223/EspSync/blob/main/integrations/wow/README.md"
 
 SMOOTHING_PRESETS = [("Instant (gaming)", 0), ("Fast", 40), ("Balanced", 80), ("Smooth (movies)", 160), ("Subtle", 320)]
+
+# Network load presets: SyncSettings values.  Fewer updates are smoothed over by
+# a matching fade on the lamp, so the gentle ones trade a little latency, not looks.
+LOAD_PRESETS: list[tuple[str, dict[str, float]]] = [
+    ("Responsive (most traffic)", {"api_rate_hz": 30.0, "udp_rate_hz": 60.0, "hue_rate_hz": 50.0,
+                                   "max_total_rate_hz": 0.0, "min_change": 0.0, "transition_ms": 0.0}),
+    ("Balanced", {"api_rate_hz": 20.0, "udp_rate_hz": 40.0, "hue_rate_hz": 50.0,
+                  "max_total_rate_hz": 150.0, "min_change": 0.01, "transition_ms": 50.0}),
+    ("Gentle on Wi-Fi (gaming)", {"api_rate_hz": 10.0, "udp_rate_hz": 25.0, "hue_rate_hz": 25.0,
+                                  "max_total_rate_hz": 60.0, "min_change": 0.02, "transition_ms": 100.0}),
+]
 
 OVERWATCH_TESTS = [("Damage", "damage"), ("Healing", "heal"), ("Critical", "lowhealth"), ("Eliminated", "elimination")]
 
@@ -76,6 +90,22 @@ def _hint(text: str) -> QLabel:
     label.setWordWrap(True)
     set_role(label, "hint")
     return label
+
+
+class SettingsDialog(QDialog):
+    """The Settings window: what applies to every light, and app updates."""
+
+    def __init__(self, panel: SettingsPanel, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("EspSync settings")
+        col = QVBoxLayout(self)
+        col.setContentsMargins(0, 8, 0, 10)
+        col.addWidget(panel.general, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.close)
+        buttons.setContentsMargins(12, 0, 12, 0)
+        col.addWidget(buttons)
+        self.resize(560, 740)
 
 
 class SettingsPanel(QObject):
@@ -197,30 +227,58 @@ class SettingsPanel(QObject):
         self._add_page("Games", wow, ow)
 
         # ------------------------------------------------------------ output
-        out = QGroupBox("LIGHT OUTPUT")
+        out = QGroupBox("ALL LIGHTS")
         f = _form(out)
+        self.load_preset = QComboBox()
+        for label, _ in LOAD_PRESETS:
+            self.load_preset.addItem(label)
+        self.load_preset.addItem("Custom")
+        self.load_preset.setToolTip("How much network traffic syncing may make. Gentler settings send fewer, "
+                                    "smoother updates; the values below show what each one does")
         self.api_rate = QSpinBox()
         self.api_rate.setRange(1, 100)
         self.api_rate.setSuffix(" updates/s")
-        self.api_rate.setToolTip("Per light over the ESPHome API. ESP32: 30-50 is fine; ESP8266: keep ≤ 25")
+        self.api_rate.setToolTip("Per lamp over the ESPHome API. ESP32: 30-50 is fine; ESP8266: keep ≤ 25")
         self.udp_rate = QSpinBox()
         self.udp_rate.setRange(1, 240)
         self.udp_rate.setSuffix(" updates/s")
+        self.udp_rate.setToolTip("Per addressable strip (WLED / E1.31). Every update is a full packet of LED colours")
         self.hue_rate = QSpinBox()
         self.hue_rate.setRange(10, 60)
         self.hue_rate.setSuffix(" packets/s")
         self.hue_rate.setToolTip("Philips Hue Entertainment stream, per bridge. The bridge drives the lights at "
                                  "about 25 Hz; 50 rides out lost packets")
+        self.total_rate = QSpinBox()
+        self.total_rate.setRange(0, 2000)
+        self.total_rate.setSingleStep(10)
+        self.total_rate.setSuffix(" updates/s")
+        self.total_rate.setSpecialValueText("No limit")
+        self.total_rate.setToolTip("Ceiling for all ESPHome lights together. With many lights each one is slowed "
+                                   "down to fit, so adding lights doesn't add traffic")
+        self.min_change = _spin(0, 10, 0.5, 1, " %")
+        self.min_change.setSpecialValueText("Off")
+        self.min_change.setToolTip("Don't send colour changes smaller than this. Stops film grain and flicker in "
+                                   "the picture from causing a constant stream of updates; the exact colour "
+                                   "still arrives within half a second")
         self.transition = QSpinBox()
         self.transition.setRange(0, 1000)
         self.transition.setSuffix(" ms")
-        self.transition.setToolTip("Transition the ESP applies per update (0 = immediate, lowest latency)")
+        self.transition.setToolTip("Fade each ESPHome lamp applies per update (0 = immediate, lowest latency). "
+                                   "At low update rates, about one update's length hides the steps")
+        self.traffic = _hint("")
         self.restore = QCheckBox("Restore lights to how they were when sync stops")
-        f.addRow("API rate", self.api_rate)
-        f.addRow("UDP rate", self.udp_rate)
+        f.addRow("Network load", self.load_preset)
+        f.addRow("Lamp rate", self.api_rate)
+        f.addRow("Strip rate", self.udp_rate)
         f.addRow("Hue rate", self.hue_rate)
-        f.addRow("Transition", self.transition)
+        f.addRow("Limit in total", self.total_rate)
+        f.addRow("Ignore changes under", self.min_change)
+        f.addRow("Lamp fade", self.transition)
+        f.addRow("Sending now", self.traffic)
+        f.addRow(_hint("If the game itself stutters rather than the connection, also lower Picture → Capture → "
+                       "Rate: it sets how often the screen is read, and nothing is sent faster than that."))
         f.addRow(self.restore)
+        self.show_traffic(None, 0)
 
         # -------------------------------------------------------------- room
         room = QGroupBox("ROOM")
@@ -256,12 +314,15 @@ class SettingsPanel(QObject):
         self.update_auto.setChecked(self.config.updates.install_automatically)
         for box, attr in ((self.update_check, "check_automatically"), (self.update_auto, "install_automatically")):
             box.toggled.connect(lambda v, a=attr: (setattr(self.config.updates, a, v), self.changed.emit("updates")))
-        self._add_page("Setup", out, room, upd, _hint("Settings save automatically."))
+        self._add_page("Room", room)
+        # App-wide settings: shown in their own window (SettingsDialog), not a tab.
+        self.general = self._page(out, upd, _hint("Settings save automatically."))
 
         self.load()
         self._connect()
 
-    def _add_page(self, title: str, *widgets: QWidget) -> None:
+    @staticmethod
+    def _page(*widgets: QWidget) -> QScrollArea:
         page = QScrollArea()
         page.setWidgetResizable(True)
         body = QWidget()
@@ -272,13 +333,23 @@ class SettingsPanel(QObject):
             col.addWidget(w)
         col.addStretch(1)
         page.setWidget(body)
-        self.pages.append((title, page))
+        return page
+
+    def _add_page(self, title: str, *widgets: QWidget) -> None:
+        self.pages.append((title, self._page(*widgets)))
 
     def deleteLater(self) -> None:
-        for _, page in self.pages:
+        for page in (*(p for _, p in self.pages), self.general):
             if page.parent() is None:
                 page.deleteLater()
         super().deleteLater()
+
+    def show_traffic(self, rate: float | None, lights: int) -> None:
+        """Live network load for the Settings window; rate=None while not syncing."""
+        if rate is None:
+            self.traffic.setText("Nothing: sync is stopped")
+        else:
+            self.traffic.setText(f"{rate:.0f} updates/s to {lights} light{'' if lights == 1 else 's'}")
 
     # ----------------------------------------------------------------- load
     def refresh_monitors(self) -> None:
@@ -316,6 +387,9 @@ class SettingsPanel(QObject):
         self.udp_rate.setValue(round(s.udp_rate_hz))
         self.hue_rate.setValue(round(s.hue_rate_hz))
         self.transition.setValue(round(s.transition_ms))
+        self.total_rate.setValue(round(s.max_total_rate_hz))
+        self.min_change.setValue(s.min_change * 100)
+        self._sync_load_preset()
         self.restore.setChecked(s.restore_on_stop)
         self.wow.setChecked(s.wow_effects)
         self.wow_threshold.setValue(round(s.wow_low_health * 100))
@@ -339,6 +413,23 @@ class SettingsPanel(QObject):
         ms = self.config.sync.smoothing_ms
         idx = next((i for i, (_, v) in enumerate(SMOOTHING_PRESETS) if v == ms), len(SMOOTHING_PRESETS))
         self.smoothing_preset.setCurrentIndex(idx)
+
+    def _sync_load_preset(self) -> None:
+        s = self.config.sync
+        idx = next(
+            (i for i, (_, values) in enumerate(LOAD_PRESETS)
+             if all(abs(getattr(s, k) - v) < 1e-6 for k, v in values.items())),
+            len(LOAD_PRESETS),
+        )
+        self.load_preset.setCurrentIndex(idx)
+
+    def _on_load_preset(self, idx: int) -> None:
+        if self._loading or idx >= len(LOAD_PRESETS):
+            return
+        for key, value in LOAD_PRESETS[idx][1].items():
+            setattr(self.config.sync, key, value)
+        self.load()
+        self.changed.emit("output")
 
     # ---------------------------------------------------------------- wiring
     def _connect(self) -> None:
@@ -371,6 +462,11 @@ class SettingsPanel(QObject):
         bind(self.udp_rate.valueChanged, s, "udp_rate_hz", float, "output")
         bind(self.hue_rate.valueChanged, s, "hue_rate_hz", float, "output")
         bind(self.transition.valueChanged, s, "transition_ms", float)
+        bind(self.total_rate.valueChanged, s, "max_total_rate_hz", float, "output")
+        bind(self.min_change.valueChanged, s, "min_change", lambda v: v / 100)
+        for w in (self.api_rate, self.udp_rate, self.hue_rate, self.transition, self.total_rate, self.min_change):
+            w.valueChanged.connect(lambda _: None if self._loading else self._silently(self._sync_load_preset))
+        self.load_preset.currentIndexChanged.connect(self._on_load_preset)
         bind(self.restore.toggled, s, "restore_on_stop")
         bind(self.wow.toggled, s, "wow_effects")
         bind(self.wow_threshold.valueChanged, s, "wow_low_health", lambda v: v / 100)
@@ -388,8 +484,11 @@ class SettingsPanel(QObject):
         self.smoothing.valueChanged.connect(lambda _: None if self._loading else self._sync_preset_silently())
 
     def _sync_preset_silently(self) -> None:
+        self._silently(self._sync_preset)
+
+    def _silently(self, update) -> None:  # noqa: ANN001
         self._loading = True
-        self._sync_preset()
+        update()
         self._loading = False
 
     def _on_backend(self) -> None:

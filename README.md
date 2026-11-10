@@ -54,7 +54,7 @@ then closes (restoring your lights), updates in place and starts again.
 * It never updates in the middle of a sync session. It waits until you stop syncing.
 * If the window is open you get a 30-second countdown with *Install now / Skip
   this version / Later*. From the tray it just updates and shows a notification.
-* Turn it off, or switch to "ask first", under Setup → Updates. *Check now* is
+* Turn it off, or switch to "ask first", under Settings → Updates. *Check now* is
   there and in the tray menu.
 * From the command line: `espsync-cli update` (or `update --check`).
 
@@ -142,9 +142,9 @@ api:
     key: !secret api_key
 ```
 
-* EspSync sends every update with a **0 ms transition**, so the light's
-  `default_transition_length` doesn't matter.
-* **Rate**: Setup → *API rate* caps commands per light (default 30/s).
+* By default EspSync sends every update with a **0 ms transition**, so the
+  light's `default_transition_length` doesn't matter.
+* **Rate**: Settings → *Lamp rate* caps commands per light (default 30/s).
   ESP32s cope with 30-50/s; keep ESP8266s at ≤ 25.
 * **Smoothing** adds perceived lag by design. Use *Instant* or *Fast* for games,
   *Smooth* for films.
@@ -152,6 +152,29 @@ api:
   so its tiny capture job isn't stuck behind the game's frames. Measured on an
   RTX 3070 under load, this cut the capture wait from ~30 ms (p95 ~140 ms) to
   ~10 ms (p95 ~20 ms).
+
+### Keeping Wi-Fi quiet while you game
+
+Every update is a packet to each light, and 2.4 GHz air time is shared with
+everything else on the network. If games lag or stutter while syncing, open
+**Settings…** (top right) and pick a gentler *Network load*:
+
+| Preset | Lamps | Strips | Hue | Total limit | Ignore changes under | Lamp fade |
+| --- | --- | --- | --- | --- | --- | --- |
+| Responsive | 30/s | 60/s | 50/s | none | off | 0 ms |
+| Balanced | 20/s | 40/s | 50/s | 150/s | 1 % | 50 ms |
+| Gentle on Wi-Fi | 10/s | 25/s | 25/s | 60/s | 2 % | 100 ms |
+
+* *Limit in total* is a ceiling for all ESPHome lights together: with many
+  lights each one is slowed down to fit, so adding lights doesn't add traffic.
+* *Ignore changes under* holds back tiny colour changes (film grain, flicker);
+  the exact colour still arrives within half a second.
+* *Lamp fade* lets each lamp glide between updates, which hides the lower rate.
+* *Sending now* (and the status bar) shows the updates per second actually
+  going out, so you can see what a change does.
+
+If the game's own frame rate suffers rather than its connection, lower
+Picture → Capture → *Rate* as well.
 
 ### Keep Home Assistant's database small
 
@@ -236,7 +259,7 @@ Notes:
   how they were when sync stops* in Settings to keep the last colours.
 * Each Hue light's *Output* is **Philips Hue (Entertainment)**, with the bridge
   and the entertainment channels it drives. A lamp sends one colour to all ticked
-  channels; a strip sends one LED per channel. *Setup → Hue rate* sets the
+  channels; a strip sends one LED per channel. *Settings → Hue rate* sets the
   packets per second (the bridge drives the lights at about 25 Hz; 50 rides
   out lost packets).
 * The pairing key is stored in the config file, like ESPHome keys. EspSync
@@ -318,7 +341,7 @@ shields all count; the bar's length over its full width is your health.
 
 * **Room → screen mapping.** Room `x` (left ↔ right wall) maps to screen
   horizontal, height maps to screen vertical, and distance from the screen wall
-  widens the sample area. *Horizontal spread* (Setup → Room) pushes side
+  widens the sample area. *Horizontal spread* (Room tab) pushes side
   lights further toward the screen edges.
 * **HDR.** With Windows HDR on, the capture is linear scRGB. EspSync divides by
   Windows' *SDR content brightness* (read live from the display config), so SDR
