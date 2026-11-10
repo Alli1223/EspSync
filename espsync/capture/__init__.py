@@ -1,17 +1,13 @@
 """Screen capture backends.
 
-* ``dxgi``   - Windows Desktop Duplication, GPU downscaling, HDR (FP16) aware.
-* ``portal`` - Linux Wayland (GNOME, KDE, wlroots): xdg-desktop-portal
-  ScreenCast + PipeWire.  Optional extra: ``pip install espsync[wayland]``.
-* ``mss``    - portable fallback (Linux X11, Windows GDI), SDR only.
+* ``dxgi`` - Windows Desktop Duplication, GPU downscaling, HDR (FP16) aware.
+* ``mss``  - portable fallback (Windows GDI, Linux X11), SDR only.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import sys
-from collections.abc import Callable, Mapping
 
 from ..config import SyncSettings
 from .base import CaptureBackend, CaptureError, Frame, MonitorInfo
@@ -25,18 +21,11 @@ __all__ = [
     "MonitorInfo",
     "available_backends",
     "create_backend",
-    "is_wayland_session",
     "list_monitors",
     "resolve_backend",
 ]
 
-
-def is_wayland_session(env: Mapping[str, str] | None = None) -> bool:
-    env = os.environ if env is None else env
-    session = env.get("XDG_SESSION_TYPE", "").lower()
-    if session in ("wayland", "x11"):
-        return session == "wayland"
-    return bool(env.get("WAYLAND_DISPLAY"))  # e.g. started from a tty/ssh shell
+BACKENDS = ("dxgi", "mss")
 
 
 def available_backends(platform: str | None = None) -> list[str]:
@@ -44,32 +33,21 @@ def available_backends(platform: str | None = None) -> list[str]:
     names = []
     if platform == "win32":
         names.append("dxgi")
-    if platform.startswith("linux"):
-        names.append("portal")
     names.append("mss")
     return names
 
 
-def resolve_backend(name: str, platform: str | None = None, env: Mapping[str, str] | None = None) -> str:
-    """Map "auto" to the best backend for this machine."""
-    if name != "auto":
+def resolve_backend(name: str, platform: str | None = None) -> str:
+    """Map "auto" (or a backend this version doesn't have) to the best one for this machine."""
+    if name in BACKENDS:
         return name
+    # "auto", or e.g. "portal" saved by 0.1.x (Wayland capture was removed in 0.2.0).
     platform = platform or sys.platform
-    if platform == "win32":
-        return "dxgi"
-    if platform.startswith("linux") and is_wayland_session(env):
-        # mss only sees XWayland windows (black elsewhere) on Wayland, so a
-        # missing dependency is reported rather than silently falling back.
-        return "portal"
-    return "mss"
+    return "dxgi" if platform == "win32" else "mss"
 
 
 def list_monitors(backend: str = "auto") -> list[MonitorInfo]:
     name = resolve_backend(backend)
-    if name == "portal":
-        from .portal_backend import list_monitors as portal_list
-
-        return portal_list()
     if name == "dxgi":
         try:
             from .dxgi import list_monitors as dxgi_list
@@ -82,21 +60,8 @@ def list_monitors(backend: str = "auto") -> list[MonitorInfo]:
     return mss_list()
 
 
-def create_backend(settings: SyncSettings, abort: Callable[[], bool] | None = None) -> CaptureBackend:
-    """Open the configured backend.
-
-    `abort` is polled while a backend waits on the user (the Wayland share
-    dialog); returning True gives up.  The portal backend writes the new
-    restore token into ``settings.portal_restore_token`` - the caller saves it.
-    """
+def create_backend(settings: SyncSettings) -> CaptureBackend:
     name = resolve_backend(settings.capture_backend)
-    if name == "portal":
-        from .portal_backend import PortalBackend
-
-        def keep_token(token: str) -> None:
-            settings.portal_restore_token = token
-
-        return PortalBackend(restore_token=settings.portal_restore_token, on_restore_token=keep_token, abort=abort)
     if name == "dxgi":
         try:
             from .dxgi import DxgiBackend

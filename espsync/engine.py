@@ -27,8 +27,11 @@ import numpy as np
 from .capture import CaptureBackend, CaptureError, create_backend
 from .color import ColorProcessor, Smoother, linear_to_srgb
 from .config import AppConfig, LightConfig
+from .effects import GameEffects, element_angles
 from .lights import ApiLightOutput, EffectController, EspHomeDevice, LightOutput, UdpOutput, VirtualOutput
 from .mapping import DEFAULT_ASPECT, light_regions
+from .procwatch import ProcessWatcher
+from .wow import PROBE_SIZE, PROCESS_NAMES, decode_signal, hide_strip
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +48,7 @@ class EngineStats:
     bars: tuple[float, float] = (0.0, 0.0)
     error: str | None = None
     lights: dict[str, str] = field(default_factory=dict)  # light id -> status text
+    game: str = ""  # game integration status, "" while no supported game runs
 
 
 class _NetLoop:
@@ -92,6 +96,7 @@ class SyncEngine:
         self._preview: np.ndarray | None = None
         self._preview_time = 0.0
         self.want_preview = True
+        self.game_effects = GameEffects()  # owned by the capture thread
 
         # network-loop state
         self._devices: dict[str, EspHomeDevice] = {}
@@ -175,6 +180,15 @@ class SyncEngine:
         """Latest captured frame as uint8 sRGB (h, w, 3), tone-mapped."""
         with self._lock:
             return self._preview
+
+    def test_levelup(self) -> None:
+        """Play the level-up effect now (shown in the preview, sent while syncing)."""
+        self.game_effects.trigger_levelup(time.perf_counter())
+
+    def test_low_health(self, seconds: float = 5.0) -> None:
+        """Pulse as if health were well below the threshold for a few seconds."""
+        health = 0.4 * self.config.sync.wow_low_health
+        self.game_effects.test_low_health(time.perf_counter(), health, seconds)
 
     def light_status(self) -> dict[str, str]:
         out = {}
@@ -270,9 +284,13 @@ class SyncEngine:
                 out.submit(colors)
 
     # ----------------------------------------------------------- capture side
-    def _build_plan(self, aspect: float) -> tuple[np.ndarray, list[tuple[LightConfig, slice]]]:
+    def _build_plan(
+        self, aspect: float
+    ) -> tuple[np.ndarray, list[tuple[LightConfig, slice]], list[tuple[LightConfig, np.ndarray]]]:
+        """Sample regions, which of them belong to which light, and each light's room angles."""
         plan = []
         regions = []
+        angles = []
         offset = 0
         for light in self.config.lights:
             if not light.enabled:
@@ -280,14 +298,15 @@ class SyncEngine:
             rs = light_regions(light, self.config.room, aspect)
             plan.append((light, slice(offset, offset + len(rs))))
             regions.extend(r.as_list() for r in rs)
+            angles.append((light, element_angles(light, self.config.room, aspect)))
             offset += len(rs)
         arr = np.array(regions, dtype=np.float32).reshape(-1, 4)
-        return arr, plan
+        return arr, plan, angles
 
     def _capture_main(self, generation: int) -> None:
         def stale() -> bool:
-            # stop() only waits 3 s for this thread; it may still be blocked in a
-            # backend (e.g. the Wayland share dialog) when a new one starts.
+            # stop() only waits 3 s for this thread; it may still be blocked
+            # opening a backend when a new one starts.
             return not self._running.is_set() or self._generation != generation
 
         backend: CaptureBackend | None = None
@@ -296,6 +315,9 @@ class SyncEngine:
         targets: dict[str, np.ndarray] = {}
         regions = np.zeros((0, 4), np.float32)
         plan: list[tuple[LightConfig, slice]] = []
+        angles: list[tuple[LightConfig, np.ndarray]] = []
+        effects = self.game_effects
+        watcher: ProcessWatcher | None = None  # is the game running?
         aspect = DEFAULT_ASPECT
         backend_key = None
         last_frame = None
@@ -311,6 +333,14 @@ class SyncEngine:
                 interval = 1.0 / max(5, min(fps, 240))
                 tick_start = time.perf_counter()
 
+                if s.wow_effects and watcher is None:
+                    watcher = ProcessWatcher(PROCESS_NAMES)
+                    watcher.start()
+                elif not s.wow_effects and watcher is not None:
+                    watcher.stop()
+                    watcher = None
+                game = watcher is not None and watcher.running
+
                 key = (s.capture_backend, s.monitor, s.hdr, s.sdr_white_nits, s.hdr_peak_nits)
                 if backend is not None and key != backend_key:
                     backend.close()
@@ -323,7 +353,7 @@ class SyncEngine:
                         continue
                     backend_key = key
                     try:
-                        backend = create_backend(s, abort=stale)
+                        backend = create_backend(s)
                     except Exception as exc:  # noqa: BLE001
                         if stale():
                             break
@@ -337,6 +367,8 @@ class SyncEngine:
                     self.stats.backend = backend.name
                     self.stats.error = None
 
+                # Full-resolution corner for the game's signal strip, only while it runs.
+                backend.probe_size = PROBE_SIZE if game else None
                 try:
                     frame = backend.grab(timeout_ms=max(1, int(interval * 1000)))
                 except CaptureError as exc:
@@ -349,6 +381,13 @@ class SyncEngine:
                 fresh = frame is not None
                 if frame is None and self._regions_dirty and last_frame is not None:
                     frame = last_frame  # layout edited while the screen is static
+                if not game:
+                    effects.observe(None, tick_start)
+                elif fresh and frame is not None:
+                    sig = decode_signal(frame.probe)
+                    if sig is not None:
+                        hide_strip(frame.image, frame.source_size, sig)  # keep it out of the lights
+                    effects.observe(sig, frame.timestamp)
                 if frame is not None:
                     last_frame = frame
                     frame_count += fresh
@@ -357,7 +396,7 @@ class SyncEngine:
                         self._regions_dirty = True
                     if self._regions_dirty:
                         self._regions_dirty = False
-                        regions, plan = self._build_plan(aspect)
+                        regions, plan, angles = self._build_plan(aspect)
                     colors = processor.process(frame, regions) if len(regions) else np.zeros((0, 3), np.float32)
                     self.stats.hdr = frame.hdr
                     self.stats.bars = processor.letterbox.bars
@@ -381,6 +420,8 @@ class SyncEngine:
                     t = targets.get(light.id)
                     if t is not None:
                         out[light.id] = smoother.apply(light.id, t, dt, tau)
+                if effects.active:
+                    out = effects.apply(out, angles, s, now)
                 with self._lock:
                     self._colors = out
                 self._latest = out
@@ -394,6 +435,7 @@ class SyncEngine:
                     self.stats.capture_fps = frame_count / (now - rate_t0)
                     self.stats.loop_fps = loop_count / (now - rate_t0)
                     self.stats.lights = self.light_status()
+                    self.stats.game = f"WoW: {effects.status_text()}" if game else ""
                     frame_count = loop_count = 0
                     rate_t0 = now
 
@@ -405,5 +447,8 @@ class SyncEngine:
             log.exception("capture loop crashed")
             self.stats.error = str(exc)
         finally:
+            if watcher is not None:
+                watcher.stop()
+            self.stats.game = ""
             if backend is not None:
                 backend.close()

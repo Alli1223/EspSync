@@ -38,8 +38,6 @@ class MonitorInfo:
     hdr: bool | None = None  # None = unknown
 
     def label(self) -> str:
-        if not (self.width and self.height):  # size unknown (Wayland portal)
-            return self.name
         hdr = " HDR" if self.hdr else ""
         prim = " (primary)" if self.primary else ""
         return f"{self.index + 1}: {self.name} {self.width}x{self.height}{hdr}{prim}"
@@ -51,6 +49,11 @@ class Frame:
 
     `image` is float32 (h, w, 3).  1.0 is SDR reference white; HDR content may
     exceed 1.0 up to `peak` (also relative to SDR white).
+
+    `probe` is the screen's top-left corner at full resolution (same units,
+    never tone-mapped), when the engine asked for it via
+    `CaptureBackend.probe_size` and the backend can provide it.  Game
+    integrations read pixel-sized signals there (see espsync.wow).
     """
 
     image: np.ndarray
@@ -59,6 +62,7 @@ class Frame:
     peak: float = 1.0
     timestamp: float = field(default_factory=time.perf_counter)
     mapped: bool = False  # set once tone mapping/clipping has been applied in place
+    probe: np.ndarray | None = None
 
     @property
     def aspect(self) -> float:
@@ -85,6 +89,9 @@ class CaptureBackend(ABC):
 
     def __init__(self, monitor: int = 0) -> None:
         self.monitor = monitor
+        # (width, height) of the full-resolution top-left corner to return as
+        # Frame.probe; None = not needed.  Set by the engine at any time.
+        self.probe_size: tuple[int, int] | None = None
 
     @abstractmethod
     def grab(self, timeout_ms: int = 100) -> Frame | None:

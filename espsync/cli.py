@@ -24,7 +24,7 @@ from pathlib import Path
 from .config import AppConfig, DeviceConfig, LightConfig, default_config_path, load_config, save_config
 from .mapping import SCREEN_PRESETS
 
-BACKEND_CHOICES = ["auto", "dxgi", "portal", "mss"]
+BACKEND_CHOICES = ["auto", "dxgi", "mss"]
 
 
 def _cfg_path(args: argparse.Namespace) -> Path:
@@ -133,22 +133,10 @@ def _print_stats(engine) -> None:  # noqa: ANN001
     )
 
 
-def _save_portal_token(path: Path, token: str) -> None:
-    """Persist a new Wayland portal restore token (they are single use).
-
-    Reloads the file so command-line overrides (--fps, --monitor) aren't saved.
-    """
-    cfg = load_config(path)
-    cfg.sync.portal_restore_token = token
-    save_config(cfg, path)
-
-
 def cmd_run(args: argparse.Namespace) -> int:
     from .engine import SyncEngine
 
-    path = _cfg_path(args)
-    cfg = load_config(path)
-    saved_token = cfg.sync.portal_restore_token
+    cfg = load_config(_cfg_path(args))
     if args.fps:
         cfg.sync.target_fps = args.fps
     if args.monitor is not None:
@@ -171,9 +159,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         while not stop and (args.duration <= 0 or time.monotonic() - t0 < args.duration):
             time.sleep(1.0)
             _print_stats(engine)
-            if cfg.sync.portal_restore_token != saved_token:
-                saved_token = cfg.sync.portal_restore_token
-                _save_portal_token(path, saved_token)
     finally:
         print("\nStopping...")
         engine.shutdown()
@@ -187,12 +172,8 @@ def cmd_bench(args: argparse.Namespace) -> int:
     from .color import ColorProcessor
     from .config import SyncSettings
 
-    path = _cfg_path(args)
-    token = load_config(path).sync.portal_restore_token
-    s = SyncSettings(capture_backend=args.backend, monitor=args.monitor or 0, portal_restore_token=token)
+    s = SyncSettings(capture_backend=args.backend, monitor=args.monitor or 0)
     backend = create_backend(s)
-    if s.portal_restore_token != token:
-        _save_portal_token(path, s.portal_restore_token)
     proc = ColorProcessor(s)
     regions = np.random.default_rng(0).uniform(0, 1, (args.regions, 4)).astype(np.float32)
     regions[:, 2:] = np.maximum(regions[:, :2] + 0.05, regions[:, 2:])

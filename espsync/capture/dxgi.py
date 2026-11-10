@@ -58,6 +58,7 @@ D3D11_SDK_VERSION = 7
 D3D_DRIVER_TYPE_UNKNOWN = 0
 D3D11_CREATE_DEVICE_BGRA_SUPPORT = 0x20
 
+DXGI_MODE_ROTATION_IDENTITY = 1
 DXGI_MODE_ROTATION_ROTATE90 = 2
 DXGI_MODE_ROTATION_ROTATE180 = 3
 DXGI_MODE_ROTATION_ROTATE270 = 4
@@ -180,6 +181,17 @@ class D3D11_TEXTURE2D_DESC(ctypes.Structure):
         ("BindFlags", c_uint),
         ("CPUAccessFlags", c_uint),
         ("MiscFlags", c_uint),
+    ]
+
+
+class D3D11_BOX(ctypes.Structure):
+    _fields_ = [
+        ("left", c_uint),
+        ("top", c_uint),
+        ("front", c_uint),
+        ("right", c_uint),
+        ("bottom", c_uint),
+        ("back", c_uint),
     ]
 
 
@@ -467,6 +479,8 @@ class DxgiBackend(CaptureBackend):
         self._srv: Com | None = None
         self._staging: Com | None = None
         self._tex_key: tuple | None = None
+        self._probe_tex: Com | None = None  # full-resolution top-left corner (Frame.probe)
+        self._probe_key: tuple | None = None
         self._level = 0
         self._small = (0, 0)
         self._format = DXGI_FORMAT_B8G8R8A8_UNORM
@@ -575,6 +589,49 @@ class DxgiBackend(CaptureBackend):
         self._staging = Com(st.value)
         self._tex_key = (w, h, fmt)
 
+    def _queue_probe(self, frame_tex: Com, desc: D3D11_TEXTURE2D_DESC) -> tuple[int, int] | None:
+        """Copy the top-left corner at full resolution into its own staging texture."""
+        assert self._device is not None and self._ctx is not None and self._out is not None
+        if not self.probe_size or self._out.rotation not in (0, DXGI_MODE_ROTATION_IDENTITY):
+            return None  # rotated: the texture's corner isn't the screen's top-left
+        pw, ph = min(self.probe_size[0], desc.Width), min(self.probe_size[1], desc.Height)
+        key = (pw, ph, desc.Format)
+        if self._probe_key != key:
+            if self._probe_tex is not None:
+                self._probe_tex.release()
+                self._probe_tex = None
+            pd = D3D11_TEXTURE2D_DESC(
+                Width=pw, Height=ph, MipLevels=1, ArraySize=1, Format=desc.Format,
+                SampleDesc=DXGI_SAMPLE_DESC(1, 0), Usage=D3D11_USAGE_STAGING,
+                BindFlags=0, CPUAccessFlags=D3D11_CPU_ACCESS_READ, MiscFlags=0,
+            )
+            pt = c_void_p()
+            _check(self._device.hr(5, (POINTER(D3D11_TEXTURE2D_DESC), c_void_p, _PP),
+                                   byref(pd), None, byref(pt)), "CreateTexture2D(probe)")
+            self._probe_tex = Com(pt.value)
+            self._probe_key = key
+        assert self._probe_tex is not None
+        box = D3D11_BOX(0, 0, 0, pw, ph, 1)
+        copy_args = (c_void_p, c_uint, c_uint, c_uint, c_uint, c_void_p, c_uint, c_void_p)
+        self._ctx.void(46, copy_args, self._probe_tex.ptr, 0, 0, 0, 0, frame_tex.ptr, 0, ctypes.addressof(box))
+        return pw, ph
+
+    def _read_probe(self, size: tuple[int, int]) -> np.ndarray:
+        assert self._ctx is not None and self._probe_tex is not None
+        ctx = self._ctx
+        mapped = D3D11_MAPPED_SUBRESOURCE()
+        _check(ctx.hr(14, (c_void_p, c_uint, c_uint, c_uint, POINTER(D3D11_MAPPED_SUBRESOURCE)),
+                      self._probe_tex.ptr, 0, D3D11_MAP_READ, 0, byref(mapped)), "Map(probe)")
+        try:
+            pw, ph = size
+            pitch = mapped.RowPitch
+            raw = np.ctypeslib.as_array(ctypes.cast(mapped.pData, POINTER(ctypes.c_ubyte)), shape=(ph, pitch))
+            if self._format == DXGI_FORMAT_R16G16B16A16_FLOAT:
+                return raw.view(np.float16).reshape(ph, pitch // 8, 4)[:, :pw, :3].astype(np.float32)
+            return bgra_to_linear(raw.reshape(ph, pitch // 4, 4)[:, :pw])
+        finally:
+            ctx.void(15, (c_void_p, c_uint), self._probe_tex.ptr, 0)  # Unmap
+
     # -- capture ---------------------------------------------------------------
     def _refresh_white_level(self) -> None:
         now = time.monotonic()
@@ -641,6 +698,7 @@ class DxgiBackend(CaptureBackend):
             ctx.void(46, copy_args, self._staging.ptr, 0, 0, 0, 0, self._mip_tex.ptr, self._level, None)
         else:
             ctx.void(46, copy_args, self._staging.ptr, 0, 0, 0, 0, frame_tex.ptr, 0, None)
+        probe_size = self._queue_probe(frame_tex, desc)  # queued before Map: one GPU wait for both
 
         mapped = D3D11_MAPPED_SUBRESOURCE()
         _check(ctx.hr(14, (c_void_p, c_uint, c_uint, c_uint, POINTER(D3D11_MAPPED_SUBRESOURCE)),
@@ -660,6 +718,7 @@ class DxgiBackend(CaptureBackend):
                 is_fp16 = False
         finally:
             ctx.void(15, (c_void_p, c_uint), self._staging.ptr, 0)  # Unmap
+        probe = self._read_probe(probe_size) if probe_size is not None else None
 
         rot = self._out.rotation
         if rot == DXGI_MODE_ROTATION_ROTATE90:
@@ -680,12 +739,17 @@ class DxgiBackend(CaptureBackend):
                 image *= scale
                 peak_nits = self.peak_override or self._out.max_nits or 1000.0
                 peak = max(1.0, peak_nits / self._white_nits)
+                if probe is not None:
+                    probe *= scale
             np.maximum(image, 0.0, out=image)  # drop out-of-gamut negatives
+            if probe is not None:
+                np.maximum(probe, 0.0, out=probe)
         self.hdr_active = hdr
         self._have_frame = True
         w, h = self._out.rect[2], self._out.rect[3]
         return Frame(
-            image=np.ascontiguousarray(image), source_size=(w, h), hdr=hdr, peak=peak, timestamp=acquired
+            image=np.ascontiguousarray(image), source_size=(w, h), hdr=hdr, peak=peak, timestamp=acquired,
+            probe=probe,
         )
 
     # -- teardown ---------------------------------------------------------------
@@ -694,12 +758,13 @@ class DxgiBackend(CaptureBackend):
         return self._white_nits
 
     def _release_textures(self) -> None:
-        for name in ("_srv", "_mip_tex", "_staging"):
+        for name in ("_srv", "_mip_tex", "_staging", "_probe_tex"):
             obj = getattr(self, name)
             if obj is not None:
                 obj.release()
                 setattr(self, name, None)
         self._tex_key = None
+        self._probe_key = None
 
     def _release_dupl(self) -> None:
         if self._dupl is not None:

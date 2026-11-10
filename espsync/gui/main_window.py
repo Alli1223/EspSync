@@ -127,7 +127,6 @@ class MainWindow(QMainWindow):
 
         # ----------------------------------------------------------- timers
         self._save_timer = QTimer(self, singleShot=True, interval=600, timeout=self.save)
-        self._saved_portal_token = config.sync.portal_restore_token
         self._restart_timer = QTimer(self, singleShot=True, interval=700, timeout=self._restart_engine)
         self._ui_timer = QTimer(self, interval=33, timeout=self._tick)
         self._preview_timer = QTimer(self, interval=120, timeout=self._tick_preview)
@@ -136,6 +135,7 @@ class MainWindow(QMainWindow):
         self.tray = self._make_tray(icon)
         self.updates = UpdateManager(self)
         self.settings.checkUpdatesRequested.connect(lambda: self.updates.check(manual=True))
+        self.settings.testEffectRequested.connect(self._test_effect)
         self.refresh_list()
         if config.lights:
             self.select_light(config.lights[0].id)
@@ -321,9 +321,15 @@ class MainWindow(QMainWindow):
             self.engine.mark_dirty()
         elif kind == "output":
             self._schedule_restart()
-        elif kind == "capture":
-            self.engine.restart()
         self._schedule_save()
+
+    def _test_effect(self, kind: str) -> None:
+        if not self.engine.running:
+            self.engine.start(send=False)  # at least show it in the preview
+        if kind == "levelup":
+            self.engine.test_levelup()
+        else:
+            self.engine.test_low_health()
 
     def _schedule_restart(self) -> None:
         if self.engine.sending:
@@ -450,14 +456,11 @@ class MainWindow(QMainWindow):
                 parts.append(" · ".join(errors[:3]))
         else:
             parts.append("preview (not sending)")
+        if st.game:
+            parts.append(st.game)
         if st.error:
             parts.append(st.error)
         self.status_label.setText("   ·   ".join(parts))
-        # The Wayland portal issues a new single-use restore token on every
-        # capture start; save it now or the next launch asks for the screen again.
-        if self.config.sync.portal_restore_token != self._saved_portal_token:
-            self._saved_portal_token = self.config.sync.portal_restore_token
-            self.save()
 
     # -------------------------------------------------------------- closing
     def closeEvent(self, event: QCloseEvent) -> None:
