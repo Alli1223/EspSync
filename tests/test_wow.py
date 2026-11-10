@@ -443,7 +443,7 @@ def game_engine(monkeypatch):
     import espsync.engine as engine_mod
 
     backend = FakeGameBackend()
-    monkeypatch.setattr(engine_mod, "create_backend", lambda settings, abort=None: backend)
+    monkeypatch.setattr(engine_mod, "create_backend", lambda settings: backend)
 
     class Watcher:
         running = True

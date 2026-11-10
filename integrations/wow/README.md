@@ -89,9 +89,7 @@ addon is older than the bundled one.
 * The effects switch on only while `Wow.exe` or `WowClassic.exe` is running
   *and* EspSync can see the strip. The status bar shows `WoW` with your health
   once the strip is found.
-* This needs the DXGI capture backend (Windows default) or mss. The Wayland
-  portal backend hands over a downscaled picture, which is too small to read the
-  strip.
+* This needs the DXGI capture backend (the Windows default) or mss.
 
 ## Test it
 

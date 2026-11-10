@@ -305,8 +305,8 @@ class SyncEngine:
 
     def _capture_main(self, generation: int) -> None:
         def stale() -> bool:
-            # stop() only waits 3 s for this thread; it may still be blocked in a
-            # backend (e.g. the Wayland share dialog) when a new one starts.
+            # stop() only waits 3 s for this thread; it may still be blocked
+            # opening a backend when a new one starts.
             return not self._running.is_set() or self._generation != generation
 
         backend: CaptureBackend | None = None
@@ -353,7 +353,7 @@ class SyncEngine:
                         continue
                     backend_key = key
                     try:
-                        backend = create_backend(s, abort=stale)
+                        backend = create_backend(s)
                     except Exception as exc:  # noqa: BLE001
                         if stale():
                             break

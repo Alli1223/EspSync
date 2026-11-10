@@ -100,24 +100,6 @@ Linux (X11):
 .venv/bin/espsync
 ```
 
-Linux (Wayland: GNOME, KDE Plasma, Sway/Hyprland...) also needs the screen-cast
-portal backend: install GStreamer's PipeWire plugin, then the `wayland` extra.
-
-```bash
-sudo apt install gstreamer1.0-pipewire libgirepository-2.0-dev libcairo2-dev pkg-config python3-dev
-```
-
-```bash
-.venv/bin/pip install -e ".[gui,wayland]"
-```
-
-(Fedora: `sudo dnf install pipewire-gstreamer gobject-introspection-devel cairo-gobject-devel`;
-Arch: `sudo pacman -S gst-plugin-pipewire gobject-introspection`. The `-dev` packages are
-only there so pip can build PyGObject; on Ubuntu 22.04 use `libgirepository1.0-dev` and
-`pip install "PyGObject<3.51"`. Alternatively, create the venv with
-`--system-site-packages` and install the distro's `python3-gi gir1.2-gstreamer-1.0`.)
-On first start the desktop asks which screen to share; the choice is remembered.
-
 (`python -m espsync` works too.)
 
 ## Quick start
@@ -222,7 +204,6 @@ two points you drag in the room.
 
 ```
  Windows: DXGI Desktop Duplication ──► GPU mipmaps ──► ~200 px frame (FP16 if HDR)
- Wayland: portal + PipeWire       ──► GStreamer scale ──►    "
  X11:     mss                     ──► subsample  ──►         "
                                                      │
                        tone map (HDR) ─► letterbox detect ─► summed-area table
@@ -271,9 +252,9 @@ to use another file. API keys are stored there in plain text.
 
 | | Windows | Linux |
 |---|---|---|
-| Capture | DXGI Desktop Duplication (GPU downscale, HDR) | Wayland: screen-cast portal + PipeWire; X11: `mss` |
+| Capture | DXGI Desktop Duplication (GPU downscale, HDR) | X11 via `mss` |
 | HDR | Yes (FP16 + tone mapping) | No (SDR) |
-| Wayland | — | GNOME, KDE Plasma, wlroots (Sway, Hyprland) via xdg-desktop-portal. `pip install espsync[wayland]` + the GStreamer PipeWire plugin. The share dialog appears once; *Settings → Choose screen again…* picks another screen |
+| Wayland | — | Not supported at the moment: run an X11 session, or apps under XWayland |
 
 * DRM-protected video (e.g. Netflix in a browser) is captured as black by Windows.
   Use a player or browser setting that turns hardware DRM off, or accept black.

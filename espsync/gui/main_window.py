@@ -127,7 +127,6 @@ class MainWindow(QMainWindow):
 
         # ----------------------------------------------------------- timers
         self._save_timer = QTimer(self, singleShot=True, interval=600, timeout=self.save)
-        self._saved_portal_token = config.sync.portal_restore_token
         self._restart_timer = QTimer(self, singleShot=True, interval=700, timeout=self._restart_engine)
         self._ui_timer = QTimer(self, interval=33, timeout=self._tick)
         self._preview_timer = QTimer(self, interval=120, timeout=self._tick_preview)
@@ -322,8 +321,6 @@ class MainWindow(QMainWindow):
             self.engine.mark_dirty()
         elif kind == "output":
             self._schedule_restart()
-        elif kind == "capture":
-            self.engine.restart()
         self._schedule_save()
 
     def _test_effect(self, kind: str) -> None:
@@ -464,11 +461,6 @@ class MainWindow(QMainWindow):
         if st.error:
             parts.append(st.error)
         self.status_label.setText("   ·   ".join(parts))
-        # The Wayland portal issues a new single-use restore token on every
-        # capture start; save it now or the next launch asks for the screen again.
-        if self.config.sync.portal_restore_token != self._saved_portal_token:
-            self._saved_portal_token = self.config.sync.portal_restore_token
-            self.save()
 
     # -------------------------------------------------------------- closing
     def closeEvent(self, event: QCloseEvent) -> None:
