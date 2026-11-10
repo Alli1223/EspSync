@@ -27,7 +27,7 @@ from platformdirs import user_config_dir
 
 APP_NAME = "EspSync"
 
-Transport = Literal["api", "wled", "e131", "virtual"]
+Transport = Literal["api", "wled", "e131", "hue", "virtual"]
 LightKind = Literal["lamp", "strip"]
 StripLayout = Literal["room", "screen"]
 
@@ -51,6 +51,29 @@ class DeviceConfig:
 
 
 @dataclass
+class HueBridgeConfig:
+    """A paired Philips Hue bridge, streamed to with the Entertainment API."""
+
+    id: str = field(default_factory=new_id)
+    name: str = ""
+    host: str = ""
+    bridge_id: str = ""  # the bridge's own id, e.g. 001788fffe6b7641 (from mDNS / config)
+    # From pairing (POST /api with generateclientkey): the REST "username" sent as
+    # the hue-application-key header and DTLS PSK identity, and the 32-hex-digit
+    # DTLS pre-shared key.
+    app_key: str = ""
+    client_key: str = ""
+    # Entertainment area (CLIP v2 entertainment_configuration id) to stream to.
+    # A bridge streams one area at a time.
+    entertainment_id: str = ""
+    entertainment_name: str = ""
+
+    @property
+    def paired(self) -> bool:
+        return bool(self.app_key and self.client_key)
+
+
+@dataclass
 class LightConfig:
     id: str = field(default_factory=new_id)
     name: str = "Light"
@@ -61,6 +84,8 @@ class LightConfig:
     # api     : ESPHome native API light_command (any ESPHome light, one colour)
     # wled    : WLED realtime UDP (ESPHome `wled` light effect), per-LED
     # e131    : sACN/E1.31 UDP (ESPHome `e131` light effect), per-LED
+    # hue     : Philips Hue Entertainment stream (one packet per frame for all
+    #           Hue lights on a bridge, ~50 Hz)
     # virtual : nothing is sent; preview only (handy for testing layouts)
     transport: Transport = "api"
     device_id: str = ""  # DeviceConfig.id for transport=api (and effect control for UDP)
@@ -71,6 +96,11 @@ class LightConfig:
     # Name of the light effect to switch on for UDP transports ("WLED", "E1.31").
     # Empty = don't touch the effect (configure it yourself in HA).
     udp_effect: str = ""
+    # transport=hue: HueBridgeConfig.id and the entertainment channel ids this
+    # light drives.  A lamp sends its colour to every listed channel; a strip
+    # sends LED i to channel i (gradient lightstrips have several channels).
+    hue_bridge: str = ""
+    hue_channels: list[int] = field(default_factory=list)
 
     # --- placement in the room -------------------------------------------------
     x: float = 0.0
@@ -138,6 +168,9 @@ class SyncSettings:
     # Output
     api_rate_hz: float = 30.0  # max commands/second per native-API light
     udp_rate_hz: float = 60.0
+    # Hue Entertainment packets/second per bridge.  The bridge forwards ~25 Hz
+    # to the lights; Hue recommends streaming at 50-60 Hz to ride out UDP loss.
+    hue_rate_hz: float = 50.0
     transition_ms: float = 0.0  # ESPHome transition per update (0 = immediate)
     restore_on_stop: bool = True
 
@@ -157,6 +190,7 @@ class UpdateConfig:
 @dataclass
 class AppConfig:
     devices: list[DeviceConfig] = field(default_factory=list)
+    hue_bridges: list[HueBridgeConfig] = field(default_factory=list)
     lights: list[LightConfig] = field(default_factory=list)
     room: RoomConfig = field(default_factory=RoomConfig)
     sync: SyncSettings = field(default_factory=SyncSettings)
@@ -166,6 +200,9 @@ class AppConfig:
     # -- lookups ---------------------------------------------------------------
     def device(self, device_id: str) -> DeviceConfig | None:
         return next((d for d in self.devices if d.id == device_id), None)
+
+    def hue_bridge(self, bridge_id: str) -> HueBridgeConfig | None:
+        return next((b for b in self.hue_bridges if b.id == bridge_id), None)
 
     def light(self, light_id: str) -> LightConfig | None:
         return next((l for l in self.lights if l.id == light_id), None)
