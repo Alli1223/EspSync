@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from ..capture import available_backends, list_monitors, resolve_backend
 from ..config import AppConfig
+from .wow_addon_dialog import WowAddonDialog
 
 BACKEND_LABELS = {
     "dxgi": "DXGI (Windows, HDR, fastest)",
@@ -167,12 +168,21 @@ class SettingsPanel(QScrollArea):
         row.addStretch(1)
         self.test_low_health.clicked.connect(lambda: self.testEffectRequested.emit("lowhealth"))
         self.test_levelup.clicked.connect(lambda: self.testEffectRequested.emit("levelup"))
-        help_label = QLabel(f'Needs the EspSync addon in WoW: <a href="{WOW_HELP_URL}">setup</a>')
+        addon = QWidget()
+        row = QHBoxLayout(addon)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.install_addon = QPushButton("Install WoW addon…")
+        self.install_addon.setToolTip("Copy the EspSync addon, which the effects need, into World of Warcraft")
+        self.install_addon.clicked.connect(self._on_install_addon)
+        help_label = QLabel(f'<a href="{WOW_HELP_URL}">Setup help</a>')
         help_label.setOpenExternalLinks(True)
+        row.addWidget(self.install_addon)
+        row.addWidget(help_label)
+        row.addStretch(1)
         f.addRow("", self.wow)
         f.addRow("Low health below", self.wow_threshold)
         f.addRow("", tests)
-        f.addRow("", help_label)
+        f.addRow("Addon", addon)
         col.addWidget(game)
 
         # -------------------------------------------------------------- room
@@ -330,6 +340,9 @@ class SettingsPanel(QScrollArea):
     def _on_repick(self) -> None:
         self.config.sync.portal_restore_token = ""
         self.changed.emit("capture")  # restarts capture, which shows the share dialog
+
+    def _on_install_addon(self) -> None:
+        WowAddonDialog(self).exec()
 
     def _on_preset(self, idx: int) -> None:
         if self._loading or idx >= len(SMOOTHING_PRESETS):

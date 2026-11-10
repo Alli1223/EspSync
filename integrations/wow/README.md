@@ -34,9 +34,35 @@ and dead/ghost state, never acts on the game, and has no network or file access.
 
 ## Install the addon
 
+### From EspSync (easiest)
+
+1. In EspSync, open **Settings → Game effects** and click **Install WoW addon…**.
+2. EspSync finds your World of Warcraft folder (from the Battle.net install
+   entries in the Windows registry) and lists the game versions in it
+   (`_retail_`, `_forever_`, `_classic_era_`, …), each with whether the addon is
+   installed and whether that copy is older than the one in this EspSync.
+   Tick the versions you play and click **Install**.
+   * If your game isn't listed (another drive, Wine, a copied install), click
+     **Choose folder…** and pick the `World of Warcraft` folder, a version folder
+     like `_retail_`, or its `Interface/AddOns` folder.
+   * EspSync writes only `Interface/AddOns/EspSync` and replaces an older copy of
+     the EspSync addon there. Your other addons aren't touched.
+3. If WoW is running, type `/reload`. Otherwise start WoW, and on the character
+   screen open **AddOns** to check that EspSync is ticked. If it's listed as *out
+   of date*, tick **Load out of date AddOns**.
+4. In game, type `/espsync`. It should print the strip's size, and you should see a
+   thin coloured line at the very top-left of the screen.
+
+When EspSync updates itself, open the dialog again: it shows when the installed
+addon is older than the bundled one.
+
+### By hand
+
 1. Quit WoW, or be ready to type `/reload` afterwards.
-2. Copy the `EspSync` folder from this directory (`integrations/wow/EspSync`)
-   into the `Interface/AddOns` folder of the game version you play:
+2. Copy the `EspSync` folder into the `Interface/AddOns` folder of the game
+   version you play. It's in this directory (`integrations/wow/EspSync`) in a
+   source checkout, and in the `WoW addon` folder where EspSync is installed
+   (for example `%LOCALAPPDATA%\Programs\EspSync\WoW addon\EspSync`):
 
    | Game version           | Folder                                               |
    |------------------------|------------------------------------------------------|

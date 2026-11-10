@@ -54,11 +54,18 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "startup"; Description: "Start EspSync when I sign in (in the system tray)"; GroupDescription: "Startup:"; Flags: unchecked
 
 [Files]
+; The app folder, including the bundled WoW addon (_internal\integrations\wow\EspSync)
+; that Settings -> Game effects -> Install WoW addon copies into the game.
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; The same addon where people can find it to copy by hand (integrations\wow\README.md).
+; No skipifsourcedoesntexist: a build without the addon should fail here.
+Source: "{#SourceDir}\_internal\integrations\wow\EspSync\*"; DestDir: "{app}\WoW addon\EspSync"; Flags: ignoreversion
 
 [InstallDelete]
 ; Clear the previous version's bundled runtime so stale libraries never linger.
 Type: filesandordirs; Name: "{app}\_internal"
+; ...and the previous hand-copy addon, so files a newer addon dropped don't linger.
+Type: filesandordirs; Name: "{app}\WoW addon"
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"

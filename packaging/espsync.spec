@@ -66,6 +66,11 @@ hidden = (
     + ["espsync_build"]
 )
 
+# The World of Warcraft addon, for Settings -> Game effects -> Install WoW addon
+# (espsync/wow_install.py finds it at _internal/integrations/wow/EspSync).
+# installer.iss also copies it to "<app>/WoW addon/EspSync" for manual installs.
+addon_datas = [(os.path.join(ROOT, "integrations", "wow", "EspSync"), os.path.join("integrations", "wow", "EspSync"))]
+
 # Qt modules we never use; keeps the bundle and installer small.
 excludes = [
     "tkinter",
@@ -90,17 +95,18 @@ excludes = [
 ]
 
 
-def analysis(script):
+def analysis(script, datas=()):
     return Analysis(  # noqa: F821
         [os.path.join(SPECPATH, script)],  # noqa: F821
         pathex=[ROOT, workpath],  # noqa: F821 - workpath holds espsync_build.py
+        datas=list(datas),
         hiddenimports=hidden,
         excludes=excludes,
         noarchive=False,
     )
 
 
-gui = analysis("espsync_gui.py")
+gui = analysis("espsync_gui.py", addon_datas)
 cli = analysis("espsync_cli.py")
 
 # Files Qt's hooks pull in that a QPainter/Widgets app doesn't need: the 20 MB
