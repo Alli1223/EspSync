@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import math
+import time
 
 import numpy as np
 from PySide6.QtCore import QSize, Qt, QTimer
@@ -10,6 +12,7 @@ from PySide6.QtGui import QCloseEvent, QColor, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -31,18 +34,20 @@ from ..engine import SyncEngine
 from ..hue import HueApi, HueArea
 from ..lights.esphome import identify_light, probe_device
 from ..scenes import SCENES, Scene, SceneResult, apply_scene, scene_by_id
+from .areas_dialog import AreasDialog
 from .devices_dialog import DevicesDialog
 from .light_panel import EntityChoice, LightPanel
 from .room_view import RoomView
 from .screen_view import ScreenView
 from .settings_panel import SettingsDialog, SettingsPanel
 from .tasks import run_async
-from .theme import C, restyle, set_kind, set_role, swatch
+from .theme import C, glow, restyle, set_kind, set_role, swatch
 from .updates import UpdateManager
+from .widgets import COLOUR_ROLE, DETAIL_ROLE, TAG_ROLE, AmbientBar, Card, LightDelegate, Segmented
 
 log = logging.getLogger(__name__)
 
-IDLE_DOT = (0.3, 0.32, 0.36)
+TRANSPORT_NAMES = {"api": "ESPHome", "wled": "WLED", "e131": "E1.31", "hue": "Hue", "virtual": "Preview only"}
 
 
 class MainWindow(QMainWindow):
@@ -56,34 +61,39 @@ class MainWindow(QMainWindow):
 
         self._stop_restore: bool | None = None  # one-off override for the next engine.stop()
 
+        self._restart_full = False  # the next engine restart also puts back lights that dropped out
+
         # ------------------------------------------------------------- header
         header = QWidget()
         header.setObjectName("header")
         bar = QHBoxLayout(header)
-        bar.setContentsMargins(14, 10, 14, 10)
+        bar.setContentsMargins(16, 10, 16, 10)
         bar.setSpacing(10)
+        logo = QLabel()
+        logo.setPixmap(icon.pixmap(26, 26))
+        bar.addWidget(logo)
+        bar.addWidget(set_role(QLabel("EspSync"), "brand"))
+        bar.addSpacing(6)
         self.sync_btn = QPushButton("▶  Start sync")
         self.sync_btn.setCheckable(True)
         self.sync_btn.setMinimumWidth(150)
         self.sync_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         set_kind(self.sync_btn, "primary")
+        self.sync_glow = glow(self.sync_btn, C.accent_deep)
         self.sync_btn.toggled.connect(self.set_syncing)
         bar.addWidget(self.sync_btn)
         bar.addWidget(self._divider())
 
-        # Scenes: one click puts every light on a plain white (and stops sync).
-        bar.addWidget(set_role(QLabel("SCENES"), "heading"))
-        self.scene_buttons: dict[str, QPushButton] = {}
-        for scene in SCENES:
-            btn = QPushButton(scene.name)
-            set_kind(btn, "chip")
-            btn.setIcon(QIcon(self._scene_swatch(scene)))
-            btn.setIconSize(QSize(14, 14))
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setToolTip(f"{scene.hint}. Stops sync and sets every light.")
-            btn.clicked.connect(lambda _=False, sid=scene.id: self.apply_scene(sid))
-            self.scene_buttons[scene.id] = btn
-            bar.addWidget(btn)
+        # Areas: which lights sync (and get scenes).
+        bar.addWidget(set_role(QLabel("AREA"), "heading"))
+        self.area_bar = Segmented()
+        self.area_bar.chosen.connect(self.set_area)
+        bar.addWidget(self.area_bar)
+        self.area_edit = QPushButton("Edit…")
+        set_kind(self.area_edit, "quiet")
+        self.area_edit.setToolTip("Make areas: sets of lights to sync on their own, like the lights on your desk")
+        self.area_edit.clicked.connect(self.edit_areas)
+        bar.addWidget(self.area_edit)
         bar.addStretch(1)
 
         # Master brightness for every light (same value as Picture → Colour → Brightness).
@@ -99,8 +109,7 @@ class MainWindow(QMainWindow):
         self.brightness.valueChanged.connect(self._on_brightness)
         bar.addWidget(self.brightness)
         self.brightness_label = QLabel()
-        self.brightness_label.setMinimumWidth(40)
-        set_role(self.brightness_label, "muted")
+        set_role(self.brightness_label, "value")
         self._show_brightness()
         bar.addWidget(self.brightness_label)
         bar.addWidget(self._divider())
@@ -112,6 +121,7 @@ class MainWindow(QMainWindow):
         settings_btn.setToolTip("Update rates and network load for all lights, app updates")
         settings_btn.clicked.connect(self.open_settings)
         bar.addWidget(settings_btn)
+        self.ambient = AmbientBar()  # under the header: what the lights show right now
 
         # ---------------------------------------------------------- status bar
         status = self.statusBar()
@@ -121,19 +131,19 @@ class MainWindow(QMainWindow):
         status.addWidget(self.state_pill)
         status.addWidget(self.status_label, 1)
 
-        # ---------------------------------------------------------- left: list
-        left = QWidget()
-        lcol = QVBoxLayout(left)
-        lcol.setContentsMargins(0, 0, 0, 0)
-        lcol.setSpacing(8)
-        lcol.addWidget(set_role(QLabel("LIGHTS"), "heading"))
+        # -------------------------------------------------- left: lights, scenes
+        lights_card = Card("Lights")
+        self.light_count = lights_card.add_to_header(set_role(QLabel("0"), "count"))
         self.light_list = QListWidget()
-        self.light_list.setIconSize(QSize(14, 14))
+        self.light_list.setProperty("flat", True)
+        self.light_list.setItemDelegate(LightDelegate(self.light_list))
+        self.light_list.setMouseTracking(True)
         self.light_list.currentItemChanged.connect(self._on_list_selection)
-        lcol.addWidget(self.light_list, 1)
+        lights_card.add(self.light_list, 1)
         btns = QHBoxLayout()
-        btns.setSpacing(6)
-        add = QPushButton("Add")
+        btns.setSpacing(4)
+        add = QPushButton("+  Add")
+        set_kind(add, "accent")
         add_menu = QMenu(add)
         add_menu.addAction("Lamp / bulb", lambda: self.add_light("lamp"))
         add_menu.addAction("Addressable strip", lambda: self.add_light("strip"))
@@ -142,37 +152,56 @@ class MainWindow(QMainWindow):
         add_menu.addAction("Lights from a Philips Hue bridge…", lambda: self.open_devices("hue"))
         add.setMenu(add_menu)
         remove = QPushButton("Remove")
+        set_kind(remove, "danger")
         remove.clicked.connect(self.remove_light)
         dup = QPushButton("Duplicate")
+        set_kind(dup, "quiet")
         dup.clicked.connect(self.duplicate_light)
-        for b in (dup, remove):
-            set_kind(b, "quiet")
         btns.addWidget(add, 1)
         btns.addWidget(dup)
         btns.addWidget(remove)
-        lcol.addLayout(btns)
-        left.setMinimumWidth(210)
+        lights_card.col.addLayout(btns)
+
+        # Scenes: one click puts every light of the area on a plain white (and stops sync).
+        scenes_card = Card("Scenes")
+        grid = QGridLayout()
+        grid.setSpacing(6)
+        self.scene_buttons: dict[str, QPushButton] = {}
+        for i, scene in enumerate(SCENES):
+            btn = QPushButton(scene.name)
+            set_kind(btn, "tile")
+            btn.setIcon(QIcon(self._scene_swatch(scene)))
+            btn.setIconSize(QSize(16, 16))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(f"{scene.hint}. Stops sync and sets every light in the area.")
+            btn.clicked.connect(lambda _=False, sid=scene.id: self.apply_scene(sid))
+            self.scene_buttons[scene.id] = btn
+            grid.addWidget(btn, i // 2, i % 2)
+        scenes_card.col.addLayout(grid)
+
+        left = QWidget()
+        lcol = QVBoxLayout(left)
+        lcol.setContentsMargins(0, 0, 0, 0)
+        lcol.setSpacing(10)
+        lcol.addWidget(lights_card, 1)
+        lcol.addWidget(scenes_card)
+        left.setMinimumWidth(250)
 
         # -------------------------------------------------------- centre/right
         self.room = RoomView(config)
         self.room.lightSelected.connect(self.select_light)
         self.room.lightChanged.connect(self._on_room_moved)
-        centre = QWidget()
-        ccol = QVBoxLayout(centre)
-        ccol.setContentsMargins(0, 0, 0, 0)
-        ccol.setSpacing(8)
-        ccol.addWidget(set_role(QLabel("ROOM"), "heading"))
-        ccol.addWidget(self.room, 1)
+        centre = Card("Room", tone="canvas")
+        centre.add_to_header(set_role(QLabel("Drag a light to where it is · scroll over a lamp to set its height"),
+                                      "hint"))
+        centre.add(self.room, 1)
 
         self.screen = ScreenView(config)
         self.screen.lightSelected.connect(self.select_light)
         self.screen.regionEdited.connect(self._on_region_edited)
-        preview = QWidget()
-        pcol = QVBoxLayout(preview)
-        pcol.setContentsMargins(0, 0, 0, 0)
-        pcol.setSpacing(8)
-        pcol.addWidget(set_role(QLabel("SCREEN"), "heading"))
-        pcol.addWidget(self.screen, 1)
+        preview = Card("Screen")
+        preview.add_to_header(set_role(QLabel("Drag a lamp's box to move where it samples"), "hint"))
+        preview.add(self.screen, 1)
 
         self.light_panel = LightPanel(config)
         self.light_panel.changed.connect(self._on_light_edited)
@@ -187,28 +216,32 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.light_panel, "Light")
         for title, page in self.settings.pages:
             tabs.addTab(page, title)
+        tabs_card = Card()
+        tabs_card.col.setContentsMargins(10, 8, 6, 8)
+        tabs_card.add(tabs, 1)
 
         right = QSplitter(Qt.Orientation.Vertical)
         right.setChildrenCollapsible(False)
         right.addWidget(preview)
-        right.addWidget(tabs)
-        right.setSizes([330, 470])
+        right.addWidget(tabs_card)
+        right.setSizes([320, 480])
 
         split = QSplitter()
         split.setChildrenCollapsible(False)
         split.addWidget(left)
         split.addWidget(centre)
         split.addWidget(right)
-        split.setSizes([230, 590, 540])
+        split.setSizes([260, 570, 530])
 
         central = QWidget()
         col = QVBoxLayout(central)
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(0)
         col.addWidget(header)
+        col.addWidget(self.ambient)
         body = QWidget()
         bcol = QVBoxLayout(body)
-        bcol.setContentsMargins(14, 12, 14, 10)
+        bcol.setContentsMargins(12, 12, 12, 10)
         bcol.addWidget(split)
         col.addWidget(body, 1)
         self.setCentralWidget(central)
@@ -224,6 +257,7 @@ class MainWindow(QMainWindow):
         self.updates = UpdateManager(self)
         self.settings.checkUpdatesRequested.connect(lambda: self.updates.check(manual=True))
         self.settings.testEffectRequested.connect(self._test_effect)
+        self._refresh_areas()
         self.refresh_list()
         if config.lights:
             self.select_light(config.lights[0].id)
@@ -244,6 +278,7 @@ class MainWindow(QMainWindow):
         tray = QSystemTrayIcon(icon, self)
         menu = QMenu()
         self.tray_toggle = menu.addAction("Start sync", lambda: self.sync_btn.toggle())
+        self.tray_area_menu = menu.addMenu("Area")
         self.add_scene_actions(menu.addMenu("Scene"))
         menu.addAction("Show window", self._show_window)
         menu.addAction("Settings…", self.open_settings)
@@ -273,6 +308,10 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
         self.sync_btn.setText("■  Stop sync" if on else "▶  Start sync")
+        halo = QColor(C.danger_deep if on else C.accent_deep)
+        halo.setAlpha(170 if on else 150)
+        self.sync_glow.setColor(halo)
+        self.sync_glow.setBlurRadius(26)
         if self.tray is not None:
             self.tray_toggle.setText("Stop sync" if on else "Start sync")
             self.tray.setToolTip("EspSync — syncing" if on else "EspSync")
@@ -291,9 +330,9 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _scene_swatch(scene: Scene):  # noqa: ANN205 - QPixmap
         if not scene.on:
-            return swatch((0.16, 0.17, 0.2))
+            return swatch((0.16, 0.17, 0.2), 16)
         level = 0.45 + 0.55 * scene.brightness  # dim scenes still read as their colour
-        return swatch(tuple(c * level for c in scene.rgb))
+        return swatch(tuple(c * level for c in scene.rgb), 16)
 
     def add_scene_actions(self, menu: QMenu) -> None:
         for scene in SCENES:
@@ -302,7 +341,7 @@ class MainWindow(QMainWindow):
                            lambda _=False, sid=scene.id: self.apply_scene(sid))
 
     def apply_scene(self, scene_id: str) -> None:
-        """Stop syncing (if running) and set every light to a preset scene."""
+        """Stop syncing (if running) and set every light of the active area to a preset scene."""
         scene = scene_by_id(scene_id)
         if scene is None:
             return
@@ -329,24 +368,101 @@ class MainWindow(QMainWindow):
         self.close()
 
     def _restart_engine(self) -> None:
-        if self.engine.running and self.engine.sending:
+        full, self._restart_full = self._restart_full, False
+        if not (self.engine.running and self.engine.sending):
+            return
+        if full:
+            # Which lights sync has changed: stop properly, so that the ones that
+            # dropped out are put back rather than left on their last colour.
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                self.engine.stop()
+                self.engine.start(send=True)
+            finally:
+                QApplication.restoreOverrideCursor()
+        else:
             self.engine.restart()
 
+    # ---------------------------------------------------------------- areas
+    def _refresh_areas(self) -> None:
+        """Rebuild the area selector (and the tray's Area menu) from the config."""
+        cfg = self.config
+        if cfg.area() is None:
+            cfg.active_area = ""
+        options = [("", "Full room", f"Sync every light ({len(cfg.lights)})")]
+        for area in cfg.areas:
+            n = len(area.light_ids)
+            options.append((area.id, area.name or "Area", f"Sync only this area's {n} light{'' if n == 1 else 's'}"))
+        self.area_bar.set_options(options, cfg.active_area)
+        if self.tray is not None:
+            self.tray_area_menu.clear()
+            for key, label, _tip in options:
+                # The action passes its "checked" flag to the first parameter.
+                action = self.tray_area_menu.addAction(label, lambda _=False, k=key: self.set_area(k))
+                action.setCheckable(True)
+                action.setChecked(key == cfg.active_area)
+
+    def set_area(self, area_id: str) -> None:
+        """Choose which lights sync: one area's, or every light ("" = the full room)."""
+        area = self.config.area(area_id) if area_id else None
+        new = area.id if area else ""
+        if new != self.config.active_area:
+            self.config.active_area = new
+            self._active_lights_changed()
+            n = len(self.config.active_lights())
+            self.statusBar().showMessage(
+                f"{area.name if area else 'Full room'}: {n} light{'' if n == 1 else 's'} to sync", 4000
+            )
+        self._refresh_areas()
+
+    def edit_areas(self) -> None:
+        dlg = AreasDialog(self.config, self)
+        dlg.changed.connect(self._on_areas_edited)
+        dlg.exec()
+
+    def _on_areas_edited(self) -> None:
+        self._refresh_areas()
+        self._active_lights_changed()
+
+    def _active_lights_changed(self) -> None:
+        """The active area or its lights changed: redraw, and re-target a running sync."""
+        self.refresh_list()
+        self.room.scene().update()
+        self.screen.update()
+        self.light_panel.update_area()
+        self.engine.mark_dirty()
+        self._restart_full = True
+        self._schedule_restart()
+        self._schedule_save()
+
+    def _join_area(self, light: LightConfig) -> None:
+        """A light added while an area is active belongs to that area."""
+        area = self.config.area()
+        if area is not None and light.id not in area.light_ids:
+            area.light_ids.append(light.id)
+
     # ---------------------------------------------------------------- lights
+    @staticmethod
+    def _light_detail(light: LightConfig) -> str:
+        what = f"Strip · {light.led_count} LEDs" if light.kind == "strip" else "Lamp"
+        return f"{what} · {TRANSPORT_NAMES.get(light.transport, light.transport)}"
+
     def refresh_list(self) -> None:
         current = self.current_light_id()
         self.light_list.blockSignals(True)
         self.light_list.clear()
+        in_area = self.config.area() is not None
         for light in self.config.lights:
-            item = QListWidgetItem(light.name + ("" if light.enabled else "  (not synced)"))
+            item = QListWidgetItem(light.name)
             item.setData(Qt.ItemDataRole.UserRole, light.id)
+            item.setData(DETAIL_ROLE, self._light_detail(light))
+            item.setData(TAG_ROLE, "" if self.config.is_active(light) else "off" if not light.enabled else "not in area")
             item.setToolTip("Addressable strip" if light.kind == "strip" else "Lamp / bulb")
-            item.setIcon(QIcon(swatch(IDLE_DOT)))
-            if not light.enabled:
-                item.setForeground(QColor(C.faint))
             self.light_list.addItem(item)
         self._dots = {}
         self.light_list.blockSignals(False)
+        total, active = len(self.config.lights), len(self.config.active_lights())
+        self.light_count.setText(f"{active} of {total}" if in_area or active != total else str(total))
         if current:
             self._select_in_list(current)
 
@@ -386,6 +502,7 @@ class MainWindow(QMainWindow):
         for k, v in fields.items():
             setattr(light, k, v)
         self.config.lights.append(light)
+        self._join_area(light)
         self._structure_changed()
         self.select_light(light.id)
         return light
@@ -402,6 +519,8 @@ class MainWindow(QMainWindow):
         data["x"] = max(-1.0, min(1.0, light.x + 0.1))
         copy = LightConfig(**data)
         self.config.lights.append(copy)
+        if light.id in getattr(self.config.area(), "light_ids", ()):
+            self._join_area(copy)
         self._structure_changed()
         self.select_light(copy.id)
 
@@ -414,6 +533,8 @@ class MainWindow(QMainWindow):
         self._structure_changed()
 
     def _structure_changed(self) -> None:
+        self.config.prune_areas()
+        self._refresh_areas()
         self.refresh_list()
         self.room.rebuild()
         self.engine.mark_dirty()
@@ -436,6 +557,10 @@ class MainWindow(QMainWindow):
 
     def _on_light_edited(self, kind: str) -> None:
         lid = self.current_light_id()
+        if kind == "membership":  # "Sync this light" or its place in the area was switched
+            self._refresh_areas()
+            self._active_lights_changed()
+            return
         if kind in ("output", "rebuild"):
             self.refresh_list()
             self.room.rebuild()
@@ -554,6 +679,8 @@ class MainWindow(QMainWindow):
         if not lights:
             return
         self.config.lights.extend(lights)
+        for light in lights:
+            self._join_area(light)
         self._structure_changed()
         self.select_light(lights[0].id)
         bridge = self.config.hue_bridge(lights[0].hue_bridge)
@@ -654,6 +781,10 @@ class MainWindow(QMainWindow):
         colors = self.engine.colors()
         self.room.set_colors(colors)
         self.screen.set_colors(colors)
+        if self.engine.sending and self.isVisible():
+            # The Stop button's halo breathes while the lights are being driven.
+            phase = 0.5 - 0.5 * math.cos(time.monotonic() * 2.6)
+            self.sync_glow.setBlurRadius(20 + 16 * phase)
 
     def _tick_preview(self) -> None:
         if self.isVisible() and not self.isMinimized():
@@ -663,20 +794,23 @@ class MainWindow(QMainWindow):
             self._update_dots()
 
     def _update_dots(self) -> None:
-        """The colour dot beside each light in the list follows what it is showing."""
+        """The dot beside each light in the list, and the bar under the header, follow what the lights show."""
         colors = self.engine.colors()
+        ambient = []
         for i in range(self.light_list.count()):
             item = self.light_list.item(i)
             lid = item.data(Qt.ItemDataRole.UserRole)
             light = self.config.light(lid)
             c = colors.get(lid)
-            if light is None or not light.enabled or c is None or not len(c):
-                rgb = IDLE_DOT
+            if light is None or not self.config.is_active(light) or c is None or not len(c):
+                rgb = None
             else:
                 rgb = tuple(round(float(v), 2) for v in np.clip(np.asarray(c).mean(axis=0), 0.0, 1.0))
-            if self._dots.get(lid) != rgb:
+                ambient.append((light.x, QColor.fromRgbF(*rgb)))
+            if self._dots.get(lid, 0) != rgb:
                 self._dots[lid] = rgb
-                item.setIcon(QIcon(swatch(rgb)))
+                item.setData(COLOUR_ROLE, QColor.fromRgbF(*rgb) if rgb else None)
+        self.ambient.set_colours([c for _, c in sorted(ambient, key=lambda pair: pair[0])])
 
     def _tick_stats(self) -> None:
         # The preview capture only matters while the window is on screen;

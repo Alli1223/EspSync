@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -24,7 +23,8 @@ from PySide6.QtWidgets import (
 
 from ..capture import available_backends, list_monitors
 from ..config import AppConfig
-from .theme import set_role
+from .theme import set_kind, set_role
+from .widgets import ToggleSwitch, slider_row
 from .wow_addon_dialog import WowAddonDialog
 
 BACKEND_LABELS = {
@@ -99,7 +99,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("EspSync settings")
         col = QVBoxLayout(self)
-        col.setContentsMargins(0, 8, 0, 10)
+        col.setContentsMargins(6, 10, 6, 12)
         col.addWidget(panel.general, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.close)
@@ -142,7 +142,7 @@ class SettingsPanel(QObject):
         self.sdr_white.setToolTip("Brightness of SDR white in HDR mode (Windows: 'SDR content brightness')")
         self.peak = _spin(0, 10000, 50, 0, " nits")
         self.peak.setSpecialValueText("from display")
-        self.gpu_priority = QCheckBox("High GPU priority for capture (recommended while gaming)")
+        self.gpu_priority = ToggleSwitch("High GPU priority for capture (recommended while gaming)")
         f.addRow("Display", self.monitor)
         f.addRow("Backend", self.backend)
         f.addRow("Rate", self.fps)
@@ -168,15 +168,15 @@ class SettingsPanel(QObject):
         self.smoothing.setRange(0, 2000)
         self.smoothing.setSuffix(" ms")
         self.min_brightness = _slider(0, 30)
-        self.black_off = QCheckBox("Turn lamps off when the screen is black")
-        self.letterbox = QCheckBox("Ignore letterbox / pillarbox bars")
+        self.black_off = ToggleSwitch("Turn lamps off when the screen is black")
+        self.letterbox = ToggleSwitch("Ignore letterbox / pillarbox bars")
         f.addRow("Mode", self.mode)
-        f.addRow("Brightness", self.brightness)
-        f.addRow("Saturation", self.saturation)
-        f.addRow("HDR saturation", self.hdr_saturation)
+        f.addRow("Brightness", slider_row(self.brightness))
+        f.addRow("Saturation", slider_row(self.saturation))
+        f.addRow("HDR saturation", slider_row(self.hdr_saturation))
         f.addRow("Smoothing", self.smoothing_preset)
         f.addRow("", self.smoothing)
-        f.addRow("Min brightness", self.min_brightness)
+        f.addRow("Min brightness", slider_row(self.min_brightness))
         f.addRow(self.black_off)
         f.addRow(self.letterbox)
         self._add_page("Picture", cap, colour)
@@ -184,7 +184,7 @@ class SettingsPanel(QObject):
         # ------------------------------------------------------ game effects
         wow = QGroupBox("WORLD OF WARCRAFT")
         f = _form(wow)
-        self.wow = QCheckBox("Red pulse at low health, gold sweep on level-up")
+        self.wow = ToggleSwitch("Red pulse at low health, gold sweep on level-up")
         self.wow.setToolTip("Active only while WoW runs with the EspSync addon, which draws a thin strip "
                             "in the top-left corner of the screen")
         self.wow_threshold = QSpinBox()
@@ -207,7 +207,7 @@ class SettingsPanel(QObject):
 
         ow = QGroupBox("OVERWATCH")
         f = _form(ow)
-        self.ow = QCheckBox("React to damage, healing, critical health and eliminations")
+        self.ow = ToggleSwitch("React to damage, healing, critical health and eliminations")
         self.ow.setToolTip("Active only while Overwatch runs. EspSync reads the health bar from the captured "
                            "picture; it never touches the game itself")
         self.ow_threshold = QSpinBox()
@@ -266,7 +266,7 @@ class SettingsPanel(QObject):
         self.transition.setToolTip("Fade each ESPHome lamp applies per update (0 = immediate, lowest latency). "
                                    "At low update rates, about one update's length hides the steps")
         self.traffic = _hint("")
-        self.restore = QCheckBox("Restore lights to how they were when sync stops")
+        self.restore = ToggleSwitch("Restore lights to how they were when sync stops")
         f.addRow("Network load", self.load_preset)
         f.addRow("Lamp rate", self.api_rate)
         f.addRow("Strip rate", self.udp_rate)
@@ -290,8 +290,8 @@ class SettingsPanel(QObject):
         self.spread.setToolTip("Lower = lights near the side walls take colour from the very edge of the screen")
         f.addRow("Width", self.room_w)
         f.addRow("Depth", self.room_d)
-        f.addRow("Screen width", self.tv_width)
-        f.addRow("Horizontal spread", self.spread)
+        f.addRow("Screen width", slider_row(self.tv_width))
+        f.addRow("Horizontal spread", slider_row(self.spread))
 
         # ----------------------------------------------------------- updates
         from .. import updater
@@ -300,12 +300,13 @@ class SettingsPanel(QObject):
         f = _form(upd)
         installed = updater.is_installed_build()
         f.addRow("Version", QLabel(updater.current_version() + ("" if installed else " (from source)")))
-        self.update_check = QCheckBox("Check GitHub for new releases")
-        self.update_auto = QCheckBox("Install updates automatically (never while syncing)")
+        self.update_check = ToggleSwitch("Check GitHub for new releases")
+        self.update_auto = ToggleSwitch("Install updates automatically (never while syncing)")
         self.update_auto.setEnabled(installed)
         if not installed:
             self.update_auto.setToolTip("Only the installed app can update itself")
         self.check_now = QPushButton("Check now")
+        set_kind(self.check_now, "accent")
         self.check_now.clicked.connect(self.checkUpdatesRequested.emit)
         f.addRow(self.update_check)
         f.addRow(self.update_auto)
@@ -325,9 +326,10 @@ class SettingsPanel(QObject):
     def _page(*widgets: QWidget) -> QScrollArea:
         page = QScrollArea()
         page.setWidgetResizable(True)
+        page.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         body = QWidget()
         col = QVBoxLayout(body)
-        col.setContentsMargins(12, 6, 12, 12)
+        col.setContentsMargins(4, 4, 12, 12)
         col.setSpacing(4)
         for w in widgets:
             col.addWidget(w)

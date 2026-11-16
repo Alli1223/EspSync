@@ -26,6 +26,8 @@ and **Philips Hue** lights alongside them, on **Windows and Linux**.
   draining to grey when you are eliminated. See [Overwatch](#overwatch).
 * **Scenes.** One click on *Warm white*, *Relax*, *Daylight*… stops the sync and
   puts every light back on a normal white. See [Scenes](#scenes).
+* **Areas.** Sync the whole room, or just a set of lights you picked, such as
+  the strip behind the monitor and the lamps on your desk. See [Areas](#areas).
 
 ## Install
 
@@ -266,10 +268,28 @@ Notes:
   doesn't check the bridge's HTTPS certificate (Hue bridges use their own CA);
   the stream itself is authenticated with the pairing key.
 
+## Areas
+
+An area is a named set of lights to sync on its own. *Full room* is always
+there and drives every light; make more with **Edit…** beside the area selector
+at the top of the window (*New area*, name it, tick its lights). Clicking an
+area in the selector (or under *Area* in the tray menu) switches to it:
+
+* only that area's lights are synced, and scenes only set those lights;
+* switching while syncing puts the lights that dropped out back to how they
+  were (if "Restore lights when sync stops" is on) and carries on with the rest;
+* the other lights stay in the room view, greyed out, so you can still move
+  them. While an area is active, the **Light** tab has a switch to move the
+  selected light in or out of it, and new lights join it.
+
+"Sync this light" still switches a light off everywhere. Headless:
+`espsync-cli run --area Desk` (`--area all` for the full room; without it, the
+area last chosen in the app).
+
 ## Scenes
 
-The row of scene buttons at the top of the window (also under *Scene* in the
-tray menu) sets every synced light to a steady colour:
+The scene buttons at the bottom left of the window (also under *Scene* in the
+tray menu) set every synced light of the active area to a steady colour:
 
 | Scene | Colour | Brightness |
 | --- | --- | --- |
@@ -368,6 +388,7 @@ espsync-cli hue-test --pattern positions          # front red / back blue, left 
 espsync-cli monitors
 espsync-cli bench                                 # capture + processing speed
 espsync-cli run                                   # sync until Ctrl+C, prints live stats
+espsync-cli run --area Desk                       # ... only the lights of one area
 espsync-cli scene warm                            # set every light to a scene (no name: list them)
 espsync-cli overwatch-hud                         # print what the Overwatch health reader sees
 ```

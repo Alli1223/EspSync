@@ -10,6 +10,7 @@ from PySide6.QtGui import (
     QBrush,
     QColor,
     QFont,
+    QLinearGradient,
     QPainter,
     QPainterPath,
     QPainterPathStroker,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QGraphicsObject,
     QGraphicsScene,
     QGraphicsSceneWheelEvent,
+    QFrame,
     QGraphicsView,
     QStyleOptionGraphicsItem,
     QWidget,
@@ -31,8 +33,25 @@ from .theme import C
 
 ROOM_PX = 520.0
 LAMP_R = 15.0
-GLOW_R = 46.0  # how far a lamp's light spills over the floor
+GLOW_R = 84.0  # how far a lamp's light spills over the floor
 IDLE = QColor(84, 90, 104)
+LABEL_BG = QColor(9, 11, 15, 190)
+
+
+def draw_label(p: QPainter, centre_x: float, top: float, text: str, colour: QColor) -> None:
+    """A light's name on a dark pill, so it reads over the glows."""
+    f = QFont(p.font())
+    f.setPointSizeF(8.0)
+    f.setWeight(QFont.Weight.DemiBold)
+    p.setFont(f)
+    width = min(p.fontMetrics().horizontalAdvance(text) + 14.0, 150.0)
+    pill = QRectF(centre_x - width / 2, top, width, 17)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(LABEL_BG)
+    p.drawRoundedRect(pill, 8.5, 8.5)
+    p.setPen(colour)
+    p.drawText(pill, Qt.AlignmentFlag.AlignCenter,
+               p.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, int(width - 8)))
 
 
 def qcolor(rgb: np.ndarray | None) -> QColor:
@@ -68,9 +87,11 @@ class Geometry:
 
 
 class LampItem(QGraphicsObject):
-    def __init__(self, light: LightConfig, geo: Geometry, on_change: Callable[[str], None]) -> None:
+    def __init__(self, light: LightConfig, geo: Geometry, on_change: Callable[[str], None],
+                 config: AppConfig) -> None:
         super().__init__()
         self.light = light
+        self.config = config
         self.geo = geo
         self.on_change = on_change
         self.color: QColor = IDLE
@@ -85,7 +106,7 @@ class LampItem(QGraphicsObject):
         self.setToolTip("Drag to move · scroll to change height")
 
     def boundingRect(self) -> QRectF:
-        return QRectF(-70, -GLOW_R, 140, 2 * GLOW_R)
+        return QRectF(-GLOW_R, -GLOW_R, 2 * GLOW_R, 2 * GLOW_R)
 
     def shape(self) -> QPainterPath:
         path = QPainterPath()
@@ -94,36 +115,46 @@ class LampItem(QGraphicsObject):
 
     def paint(self, p: QPainter, option: QStyleOptionGraphicsItem, widget: QWidget | None = None) -> None:
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        enabled = self.light.enabled
+        active = self.config.is_active(self.light)
+        lit = active and self.color != IDLE
+        selected = self.isSelected()
         p.setPen(Qt.PenStyle.NoPen)
-        if enabled and self.color != IDLE:
-            # The light it throws on the floor.
+        if lit:
+            # The light it throws on the floor; pools from several lamps add up.
             glow = QRadialGradient(QPointF(0, 0), GLOW_R)
-            inner, outer = QColor(self.color), QColor(self.color)
-            inner.setAlpha(95)
-            outer.setAlpha(0)
-            glow.setColorAt(0.25, inner)
-            glow.setColorAt(1.0, outer)
+            for stop, alpha in ((0.0, 120), (0.3, 62), (0.65, 18), (1.0, 0)):
+                c = QColor(self.color)
+                c.setAlpha(alpha)
+                glow.setColorAt(stop, c)
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
             p.setBrush(glow)
             p.drawEllipse(QPointF(0, 0), GLOW_R, GLOW_R)
-        p.setBrush(self.color if enabled else IDLE.darker(150))
-        selected = self.isSelected()
-        p.setPen(QPen(QColor("white") if selected else QColor(C.window), 2.5 if selected else 2.0))
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        if selected:
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor(C.accent), 2.0))
+            p.drawEllipse(QPointF(0, 0), LAMP_R + 5, LAMP_R + 5)
+        if active:
+            base = self.color
+            orb = QRadialGradient(QPointF(-4, -5), LAMP_R * 1.7)
+            orb.setColorAt(0.0, base.lighter(155) if lit else base.lighter(125))
+            orb.setColorAt(0.55, base)
+            orb.setColorAt(1.0, base.darker(125))
+            p.setBrush(orb)
+            p.setPen(QPen(QColor("white") if selected else QColor(C.canvas), 2.0))
+        else:
+            p.setBrush(QColor(C.raised))
+            p.setPen(QPen(QColor(C.border_strong), 1.5, Qt.PenStyle.DashLine))
         p.drawEllipse(QPointF(0, 0), LAMP_R, LAMP_R)
         # Height gauge
-        bar = QRectF(LAMP_R + 6, -LAMP_R + 2, 4, 2 * LAMP_R - 4)
+        bar = QRectF(LAMP_R + 7, -LAMP_R + 2, 4, 2 * LAMP_R - 4)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(C.border_strong))
+        p.setBrush(QColor(255, 255, 255, 38))
         p.drawRoundedRect(bar, 2, 2)
         fill = bar.height() * max(0.0, min(1.0, self.light.z))
-        p.setBrush(QColor(C.text))
+        p.setBrush(QColor(C.text) if active else QColor(C.faint))
         p.drawRoundedRect(QRectF(bar.left(), bar.bottom() - fill, bar.width(), fill), 2, 2)
-        # Label
-        p.setPen(QColor(C.text) if enabled else QColor(C.faint))
-        f = QFont(p.font())
-        f.setPointSizeF(8.5)
-        p.setFont(f)
-        p.drawText(QRectF(-70, LAMP_R + 4, 140, 16), Qt.AlignmentFlag.AlignHCenter, self.light.name)
+        draw_label(p, 0, LAMP_R + 7, self.light.name, QColor(C.text) if active else QColor(C.faint))
 
     def itemChange(self, change: QGraphicsItem.GraphicsItemChange, value):  # noqa: ANN001
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
@@ -167,11 +198,11 @@ class HandleItem(QGraphicsObject):
     def paint(self, p: QPainter, option: QStyleOptionGraphicsItem, widget: QWidget | None = None) -> None:
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(QPen(QColor("white"), 1.5))
-        p.setBrush(QColor(60, 60, 70))
+        p.setBrush(QColor(C.accent_deep))
         if self.end == 0:
             p.drawEllipse(QPointF(0, 0), 5.5, 5.5)
         else:
-            p.drawRect(QRectF(-5, -5, 10, 10))
+            p.drawRoundedRect(QRectF(-5, -5, 10, 10), 2.5, 2.5)
 
     def itemChange(self, change: QGraphicsItem.GraphicsItemChange, value):  # noqa: ANN001
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
@@ -191,9 +222,11 @@ class HandleItem(QGraphicsObject):
 class StripItem(QGraphicsObject):
     """An addressable strip: a line in the room, or a band behind the TV."""
 
-    def __init__(self, light: LightConfig, geo: Geometry, on_change: Callable[[str], None]) -> None:
+    def __init__(self, light: LightConfig, geo: Geometry, on_change: Callable[[str], None],
+                 config: AppConfig) -> None:
         super().__init__()
         self.light = light
+        self.config = config
         self.geo = geo
         self.on_change = on_change
         self.colors: np.ndarray | None = None
@@ -218,7 +251,7 @@ class StripItem(QGraphicsObject):
         return path
 
     def boundingRect(self) -> QRectF:
-        return self._path().boundingRect().adjusted(-12, -12, 12, 24)
+        return self._path().boundingRect().adjusted(-76, -20, 76, 30)
 
     def shape(self) -> QPainterPath:
         stroker = QPainterPathStroker()
@@ -228,31 +261,41 @@ class StripItem(QGraphicsObject):
     def paint(self, p: QPainter, option: QStyleOptionGraphicsItem, widget: QWidget | None = None) -> None:
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         path = self._path()
-        if self.isSelected():
-            p.setPen(QPen(QColor(255, 255, 255, 160), 11, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            p.drawPath(path)
-        p.setPen(QPen(QColor(C.window), 8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        p.drawPath(path)
+        active = self.config.is_active(self.light)
         colors = self.colors
-        n = len(colors) if colors is not None and self.light.enabled else 0
+        n = len(colors) if colors is not None and active else 0
         length = path.length()
+        segments = []
         if n and length > 0:
             step = length / n
             for i in range(n):
                 a = path.pointAtPercent(path.percentAtLength(i * step))
                 b = path.pointAtPercent(path.percentAtLength(min(length, (i + 1) * step)))
-                idx = n - 1 - i if self.light.reverse else i
-                p.setPen(QPen(qcolor(colors[idx]), 5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+                segments.append((a, b, qcolor(colors[n - 1 - i if self.light.reverse else i])))
+        if segments and n <= 150:
+            # The strip's light on the floor around it.
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+            for a, b, c in segments:
+                halo = QColor(c)
+                halo.setAlpha(34)
+                p.setPen(QPen(halo, 22, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+                p.drawLine(a, b)
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        if self.isSelected():
+            p.setPen(QPen(QColor(C.accent), 12, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawPath(path)
+        p.setPen(QPen(QColor(C.canvas), 8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawPath(path)
+        if segments:
+            for a, b, c in segments:
+                p.setPen(QPen(c, 5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
                 p.drawLine(a, b)
         else:
-            p.setPen(QPen(IDLE, 5))
+            p.setPen(QPen(IDLE if active else QColor(C.border_strong), 5, Qt.PenStyle.SolidLine,
+                          Qt.PenCapStyle.RoundCap))
             p.drawPath(path)
-        p.setPen(QColor(C.text) if self.light.enabled else QColor(C.faint))
-        f = QFont(p.font())
-        f.setPointSizeF(8.5)
-        p.setFont(f)
         mid = path.pointAtPercent(0.5)
-        p.drawText(QRectF(mid.x() - 70, mid.y() + 6, 140, 16), Qt.AlignmentFlag.AlignHCenter, self.light.name)
+        draw_label(p, mid.x(), mid.y() + 9, self.light.name, QColor(C.text) if active else QColor(C.faint))
 
     def add_handles(self, scene: QGraphicsScene) -> None:
         if self.light.strip_layout == "screen":
@@ -272,7 +315,7 @@ class RoomView(QGraphicsView):
         self.config = config
         self.setScene(QGraphicsScene(self))
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.setBackgroundBrush(QColor(C.canvas))
+        self.setFrameShape(QFrame.Shape.NoFrame)  # it sits in a card that supplies the background
         self.setMinimumSize(360, 300)
         self.items_by_id: dict[str, LampItem | StripItem] = {}
         self._suppress = False
@@ -288,42 +331,62 @@ class RoomView(QGraphicsView):
         self.items_by_id.clear()
         geo = self.geo = Geometry(self.config.room)
         room = geo.rect
-        scene.setSceneRect(room.adjusted(-40, -50, 40, 40))
+        scene.setSceneRect(room.adjusted(-44, -42, 44, 34))
 
         floor = QPainterPath()
-        floor.addRoundedRect(room, 8, 8)
-        scene.addPath(floor, QPen(QColor(C.border_strong), 1.5), QBrush(QColor(C.floor)))
-        grid = QPen(QColor(C.grid), 1, Qt.PenStyle.DashLine)
-        for i in range(1, 4):
-            x = room.left() + room.width() * i / 4
-            y = room.top() + room.height() * i / 4
-            scene.addLine(x, room.top(), x, room.bottom(), grid)
-            scene.addLine(room.left(), y, room.right(), y, grid)
+        floor.addRoundedRect(room, 12, 12)
+        wood = QLinearGradient(room.topLeft(), room.bottomLeft())
+        wood.setColorAt(0.0, QColor(C.floor_edge))
+        wood.setColorAt(1.0, QColor(C.floor))
+        scene.addPath(floor, QPen(QColor(C.border_strong), 1.2), QBrush(wood))
+        dots = QPainterPath()
+        for i in range(1, 8):
+            for j in range(1, 8):
+                centre = QPointF(room.left() + room.width() * i / 8, room.top() + room.height() * j / 8)
+                dots.addEllipse(centre, 1.1, 1.1)
+        scene.addPath(dots, QPen(Qt.PenStyle.NoPen), QBrush(QColor(C.grid)))
 
+        # The screen, and the light it throws into the room.
+        throw = QPainterPath()
+        reach = geo.d * 0.42
+        throw.moveTo(-geo.tv_w / 2, room.top() + 2)
+        throw.lineTo(geo.tv_w / 2, room.top() + 2)
+        throw.lineTo(geo.tv_w / 2 + reach * 0.45, room.top() + reach)
+        throw.lineTo(-geo.tv_w / 2 - reach * 0.45, room.top() + reach)
+        throw.closeSubpath()
+        beam = QLinearGradient(0, room.top(), 0, room.top() + reach)
+        beam.setColorAt(0.0, QColor(160, 175, 255, 30))
+        beam.setColorAt(1.0, QColor(160, 175, 255, 0))
+        scene.addPath(throw.intersected(floor), QPen(Qt.PenStyle.NoPen), QBrush(beam))
         tv = QPainterPath()
-        tv.addRoundedRect(QRectF(-geo.tv_w / 2, room.top() - 5, geo.tv_w, 8), 3, 3)
-        scene.addPath(tv, QPen(QColor(C.muted), 1), QBrush(QColor("#07080a")))
-        label = scene.addSimpleText("SCREEN")
+        tv.addRoundedRect(QRectF(-geo.tv_w / 2, room.top() - 5, geo.tv_w, 8), 4, 4)
+        scene.addPath(tv, QPen(QColor(C.accent), 1.2), QBrush(QColor("#05060a")))
+        caps = QFont(self.font())
+        caps.setPointSizeF(7.5)
+        caps.setWeight(QFont.Weight.Bold)
+        caps.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.2)
+        label = scene.addSimpleText("SCREEN", caps)
         label.setBrush(QColor(C.muted))
-        label.setPos(-label.boundingRect().width() / 2, room.top() - 28)
+        label.setPos(-label.boundingRect().width() / 2, room.top() - 26)
         sofa = QPainterPath()
-        sofa_rect = QRectF(-geo.w * 0.18, geo.d * 0.22, geo.w * 0.36, 26)
-        sofa.addRoundedRect(sofa_rect, 7, 7)
+        sofa_rect = QRectF(-geo.w * 0.18, geo.d * 0.22, geo.w * 0.36, 30)
+        sofa.addRoundedRect(sofa_rect, 9, 9)
+        sofa.addRoundedRect(sofa_rect.adjusted(-7, 6, -sofa_rect.width() + 1, 4), 4, 4)
+        sofa.addRoundedRect(sofa_rect.adjusted(sofa_rect.width() - 1, 6, 7, 4), 4, 4)
+        sofa.setFillRule(Qt.FillRule.WindingFill)
         scene.addPath(sofa, QPen(QColor(C.border_strong), 1), QBrush(QColor(C.raised)))
-        sofa_label = scene.addSimpleText("you")
+        sofa_label = scene.addSimpleText("YOU", caps)
         sofa_label.setBrush(QColor(C.faint))
-        sofa_label.setPos(-sofa_label.boundingRect().width() / 2, sofa_rect.center().y() - 8)
-        hint = scene.addSimpleText("Drag lights to where they are in the room · scroll over a lamp to set its height")
-        hint.setBrush(QColor(C.faint))
-        hint.setPos(-hint.boundingRect().width() / 2, room.bottom() + 10)
+        sofa_label.setPos(-sofa_label.boundingRect().width() / 2,
+                          sofa_rect.center().y() - sofa_label.boundingRect().height() / 2)
 
         for light in self.config.lights:
             if light.kind == "strip":
-                item: LampItem | StripItem = StripItem(light, geo, self._changed)
+                item: LampItem | StripItem = StripItem(light, geo, self._changed, self.config)
                 scene.addItem(item)
                 item.add_handles(scene)
             else:
-                item = LampItem(light, geo, self._changed)
+                item = LampItem(light, geo, self._changed, self.config)
                 scene.addItem(item)
             self.items_by_id[light.id] = item
         self._suppress = False

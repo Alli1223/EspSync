@@ -233,7 +233,7 @@ def scene_targets(config: AppConfig) -> tuple[dict[str, set[str]], dict[str, set
     hue: dict[str, set[int]] = {}
     unreachable = 0
     for light in config.lights:
-        if not light.enabled or light.transport == "virtual":
+        if not config.is_active(light) or light.transport == "virtual":
             continue
         if light.transport == "hue":
             if light.hue_bridge and light.hue_channels:
@@ -248,7 +248,7 @@ def scene_targets(config: AppConfig) -> tuple[dict[str, set[str]], dict[str, set
 
 
 async def apply_scene(config: AppConfig, scene: Scene) -> SceneResult:
-    """Set every enabled light to `scene`.  Call it while sync is stopped."""
+    """Set every light of the active area to `scene`.  Call it while sync is stopped."""
     esphome, hue, unreachable = scene_targets(config)
     jobs = []
     for device_id, entities in esphome.items():

@@ -249,7 +249,7 @@ class SyncEngine:
         from zeroconf.asyncio import AsyncZeroconf
 
         cfg = self.config
-        lights = [l for l in cfg.lights if l.enabled]
+        lights = cfg.active_lights()
         needed = {
             l.device_id for l in lights
             if l.device_id and l.transport in ("api", "wled", "e131")
@@ -374,7 +374,7 @@ class SyncEngine:
         positions = []
         offset = 0
         for light in self.config.lights:
-            if not light.enabled:
+            if not self.config.is_active(light):
                 continue
             rs = light_regions(light, self.config.room, aspect)
             plan.append((light, slice(offset, offset + len(rs))))

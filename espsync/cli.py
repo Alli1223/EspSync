@@ -382,6 +382,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         cfg.sync.target_fps = args.fps
     if args.monitor is not None:
         cfg.sync.monitor = args.monitor
+    if args.area is not None:
+        wanted = args.area.strip().lower()
+        area = next((a for a in cfg.areas if wanted in (a.name.lower(), a.id)), None)
+        if area is None and wanted not in ("", "all", "full room"):
+            names = ", ".join(a.name for a in cfg.areas) or "none defined"
+            print(f"No area called {args.area!r} (areas: {names}; 'all' = the full room).", file=sys.stderr)
+            return 2
+        cfg.active_area = area.id if area else ""
     if not cfg.lights:
         print("No lights configured. Use the GUI or `espsync-cli add-light`.", file=sys.stderr)
         return 2
@@ -610,6 +618,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--duration", type=float, default=0, help="seconds (0 = until Ctrl+C)")
     s.add_argument("--fps", type=int)
     s.add_argument("--monitor", type=int)
+    s.add_argument("--area", help="sync only the lights of this area ('all' = the full room; "
+                                  "default: the area chosen in the app)")
     s.set_defaults(func=cmd_run)
 
     s = sub.add_parser("scene", help="set every light to a preset scene (no argument: list them)")
