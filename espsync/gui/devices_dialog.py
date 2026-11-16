@@ -5,7 +5,6 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -30,6 +29,8 @@ from ..discovery import DiscoveredDevice, discover
 from ..lights.esphome import probe_device
 from .hue_page import HuePage
 from .tasks import run_async
+from .theme import set_kind, set_role
+from .widgets import ToggleSwitch
 
 KEY_HELP = (
     "The encryption key is in the device's ESPHome YAML (ESPHome dashboard → Edit) under "
@@ -43,6 +44,9 @@ class DeviceEditDialog(QDialog):
         self.setWindowTitle("ESPHome device")
         self.device = device
         form = QFormLayout(self)
+        form.setContentsMargins(18, 16, 18, 14)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(10)
         self.name = QLineEdit(device.name)
         self.host = QLineEdit(device.host)
         self.host.setPlaceholderText("living-room-lamp.local or 192.168.1.50")
@@ -52,7 +56,7 @@ class DeviceEditDialog(QDialog):
         self.key = QLineEdit(device.encryption_key)
         self.key.setEchoMode(QLineEdit.EchoMode.Password)
         self.key.setPlaceholderText("base64 key from api: encryption: key:")
-        show = QCheckBox("show")
+        show = ToggleSwitch("show")
         show.toggled.connect(
             lambda v: self.key.setEchoMode(QLineEdit.EchoMode.Normal if v else QLineEdit.EchoMode.Password)
         )
@@ -133,13 +137,16 @@ class DevicesDialog(QDialog):
         self.setWindowTitle("Devices")
         self.resize(780, 620)
         outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 12, 16, 14)
         self.tabs = QTabWidget()
         outer.addWidget(self.tabs, 1)
         esphome = QWidget()
         col = QVBoxLayout(esphome)
 
-        col.addWidget(QLabel("<b>Your devices</b>"))
+        col.addWidget(set_role(QLabel("Your devices"), "section"))
         self.table = QTableWidget(0, 3)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setShowGrid(False)
         self.table.setHorizontalHeaderLabels(["Name", "Host", "Encryption"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -156,13 +163,17 @@ class DevicesDialog(QDialog):
         ):
             b = QPushButton(label)
             b.clicked.connect(slot)
+            if slot == self._import:
+                set_kind(b, "accent")
+            elif slot == self._remove:
+                set_kind(b, "danger")
             row.addWidget(b)
         row.addStretch(1)
         col.addLayout(row)
 
         col.addSpacing(10)
         head = QHBoxLayout()
-        head.addWidget(QLabel("<b>Found on your network</b>"))
+        head.addWidget(set_role(QLabel("Found on your network"), "section"))
         head.addStretch(1)
         self.scan_btn = QPushButton("Scan")
         self.scan_btn.clicked.connect(self._scan)

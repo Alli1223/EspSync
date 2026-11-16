@@ -7,7 +7,6 @@ import threading
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -29,6 +28,8 @@ from PySide6.QtWidgets import (
 from ..config import AppConfig, HueBridgeConfig, LightConfig
 from ..hue import DiscoveredBridge, HueApi, HueArea, bridge_info, discover_bridges, hue_to_room, lights_for_area, pair
 from .tasks import run_async
+from .theme import set_kind, set_role
+from .widgets import ToggleSwitch
 
 PAIR_TIMEOUT = 30.0
 AREA_HELP = "Create or change entertainment areas in the Hue app: Settings → Entertainment areas."
@@ -134,9 +135,11 @@ class HuePage(QWidget):
         self._scanned = False
         col = QVBoxLayout(self)
 
-        col.addWidget(QLabel("<b>Your Hue bridges</b>"))
+        col.addWidget(set_role(QLabel("Your Hue bridges"), "section"))
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Name", "Address", "Entertainment area"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setShowGrid(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -154,12 +157,12 @@ class HuePage(QWidget):
 
         col.addSpacing(6)
         head = QHBoxLayout()
-        head.addWidget(QLabel("<b>Entertainment area</b>"))
+        head.addWidget(set_role(QLabel("Entertainment area"), "section"))
         self.area = QComboBox()
         self.area.currentIndexChanged.connect(self._on_area)
         head.addWidget(self.area, 1)
         self.reload_btn = QPushButton("↻")
-        self.reload_btn.setFixedWidth(32)
+        set_kind(self.reload_btn, "icon")
         self.reload_btn.setToolTip("Reload the bridge's entertainment areas")
         self.reload_btn.clicked.connect(lambda: self._load_areas(self._selected()))
         head.addWidget(self.reload_btn)
@@ -171,10 +174,11 @@ class HuePage(QWidget):
         self.channels = QListWidget()
         col.addWidget(self.channels, 1)
         imp = QHBoxLayout()
-        self.group = QCheckBox("Gradient lightstrips as one strip")
+        self.group = ToggleSwitch("Gradient lightstrips as one strip")
         self.group.setToolTip("Off: every segment is its own light you can place in the room.\n"
                               "On: one strip per gradient light, sampled along the screen path through its segments.")
         self.import_btn = QPushButton("Add the area's lights to the room")
+        set_kind(self.import_btn, "accent")
         self.import_btn.clicked.connect(self._import)
         imp.addWidget(self.group)
         imp.addStretch(1)
@@ -183,7 +187,7 @@ class HuePage(QWidget):
 
         col.addSpacing(6)
         head = QHBoxLayout()
-        head.addWidget(QLabel("<b>Found on your network</b>"))
+        head.addWidget(set_role(QLabel("Found on your network"), "section"))
         head.addStretch(1)
         self.scan_btn = QPushButton("Scan")
         self.scan_btn.clicked.connect(self.scan)

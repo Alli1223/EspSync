@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QImage, QMouseEvent, QPainter, QPen, QWheelEvent
+from PySide6.QtGui import QBrush, QColor, QFont, QImage, QMouseEvent, QPainter, QPainterPath, QPen, QWheelEvent
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from ..config import AppConfig, LightConfig
@@ -56,7 +56,7 @@ class ScreenView(QWidget):
 
     # -------------------------------------------------------------- geometry
     def _picture(self) -> QRectF:
-        r = QRectF(self.rect()).adjusted(8, 8, -8, -8)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         if r.width() / max(r.height(), 1) > self.aspect:
             w = r.height() * self.aspect
             return QRectF(r.center().x() - w / 2, r.top(), w, r.height())
@@ -79,7 +79,7 @@ class ScreenView(QWidget):
 
     def _lamp_at(self, pos: QPointF) -> LightConfig | None:
         active = self._active()
-        lamps = [l for l in self.config.lights if l.enabled and l.kind == "lamp"]
+        lamps = [l for l in self.config.active_lights() if l.kind == "lamp"]
         # Prefer the selected lamp, then the smallest region under the cursor.
         hits = []
         for light in lamps:
@@ -92,21 +92,32 @@ class ScreenView(QWidget):
         return hits[0][2]
 
     # --------------------------------------------------------------- painting
+    @staticmethod
+    def _tag(p: QPainter, anchor: QPointF, text: str, colour: QColor, right: bool = False) -> None:
+        """A small dark pill with text; `anchor` is its top-left (top-right with right=True)."""
+        width = p.fontMetrics().horizontalAdvance(text) + 14
+        pill = QRectF(anchor.x() - (width if right else 0), anchor.y(), width, 18)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(9, 11, 15, 200))
+        p.drawRoundedRect(pill, 9, 9)
+        p.setPen(colour)
+        p.drawText(pill, Qt.AlignmentFlag.AlignCenter, text)
+
     def paintEvent(self, event) -> None:  # noqa: ANN001
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(QPen(QColor(C.border), 1))
-        p.setBrush(QColor(C.canvas))
-        p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
         pic = self._picture()
+        frame = QPainterPath()
+        frame.addRoundedRect(pic, 8, 8)
+        p.setClipPath(frame)
         if self.image is not None:
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             p.drawImage(pic, self.image)
+            p.fillRect(pic, QColor(0, 0, 0, 60))  # dim so the overlays read clearly
         else:
             p.fillRect(pic, QColor(C.surface))
             p.setPen(QColor(C.muted))
             p.drawText(pic, Qt.AlignmentFlag.AlignCenter, "Waiting for screen capture…")
-        p.fillRect(pic, QColor(0, 0, 0, 70))  # dim so the overlays read clearly
 
         bv, bh = self.bars
         if bv > 0 or bh > 0:
@@ -123,11 +134,10 @@ class ScreenView(QWidget):
 
         active = self._active()
         font = QFont(self.font())
-        font.setPointSizeF(8.5)
+        font.setPointSizeF(8.0)
+        font.setWeight(QFont.Weight.DemiBold)
         p.setFont(font)
-        lights = sorted(
-            (l for l in self.config.lights if l.enabled), key=lambda l: l.id == self.selected
-        )
+        lights = sorted(self.config.active_lights(), key=lambda l: l.id == self.selected)
         for light in lights:
             regions = light_regions(light, self.config.room, self.aspect)
             cols = self.colors.get(light.id)
@@ -143,21 +153,28 @@ class ScreenView(QWidget):
             rect = self._to_rect(regions[0], active)
             c = qcolor(cols[0]) if cols is not None and len(cols) else IDLE
             fill = QColor(c)
-            fill.setAlpha(90 if selected else 45)
-            pen = QPen(QColor("white") if selected else c.lighter(130), 2.5 if selected else 1.5)
+            fill.setAlpha(95 if selected else 45)
+            if selected:
+                halo = QColor(C.accent)
+                halo.setAlpha(110)
+                p.setPen(QPen(halo, 5))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(rect, 7, 7)
+            pen = QPen(QColor("white") if selected else c.lighter(135), 2.0 if selected else 1.5)
             if light.region:
                 pen.setStyle(Qt.PenStyle.DashLine)
             p.setPen(pen)
             p.setBrush(fill)
-            p.drawRect(rect)
-            p.setPen(QColor("white"))
-            p.drawText(rect.adjusted(5, 3, -5, -3), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
-                       light.name + (" (manual)" if light.region else ""))
+            p.drawRoundedRect(rect, 6, 6)
+            self._tag(p, rect.topLeft() + QPointF(6, 6), light.name + (" · manual" if light.region else ""),
+                      QColor("white") if selected else QColor(C.text))
 
         if self.hdr:
-            p.setPen(QColor(255, 210, 90))
-            p.drawText(pic.adjusted(6, 4, -6, -4), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
-                       "HDR → tone-mapped")
+            self._tag(p, pic.bottomRight() + QPointF(-8, -26), "HDR · tone-mapped", QColor(C.warn), right=True)
+        p.setClipping(False)
+        p.setPen(QPen(QColor(255, 255, 255, 28), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(pic.adjusted(0.5, 0.5, -0.5, -0.5), 8, 8)
         p.end()
 
     # ------------------------------------------------------------------ input

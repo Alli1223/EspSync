@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QFormLayout,
     QHBoxLayout,
@@ -15,6 +14,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSpinBox,
     QVBoxLayout,
@@ -25,6 +25,8 @@ from ..config import AppConfig, LightConfig
 from ..hue import HueArea
 from ..mapping import SCREEN_PRESETS
 from .hue_page import channel_text, channel_tooltip
+from .theme import set_kind, set_role
+from .widgets import ToggleSwitch, slider_row
 
 TRANSPORTS = [
     ("api", "ESPHome API (direct)"),
@@ -49,8 +51,15 @@ def _slider(lo: int, hi: int) -> QSlider:
     return s
 
 
+def _section(title: str) -> QLabel:
+    label = set_role(QLabel(title.upper()), "heading")
+    label.setContentsMargins(0, 8, 0, 0)
+    return label
+
+
 class LightPanel(QWidget):
-    changed = Signal(str)  # "layout" | "output" | "appearance"
+    # "layout" | "output" | "appearance" | "rebuild" | "membership" (whether sync drives the light at all)
+    changed = Signal(str)
     identifyRequested = Signal(str)
     refreshEntitiesRequested = Signal(str)
     refreshHueRequested = Signal(str)  # Hue bridge id
@@ -64,17 +73,26 @@ class LightPanel(QWidget):
         self._loading = False
 
         outer = QVBoxLayout(self)
-        self.empty = QLabel("Select a light in the room or the list.")
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.empty = set_role(QLabel("Select a light in the room or the list\nto set it up here."), "muted")
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        outer.addWidget(self.empty)
+        outer.addWidget(self.empty, 1)
         self.body = QWidget()
-        outer.addWidget(self.body)
-        outer.addStretch(1)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setWidget(self.body)
+        outer.addWidget(self.scroll, 1)
         form = self.form = QFormLayout(self.body)
+        form.setContentsMargins(6, 2, 12, 8)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(8)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
         self.name = QLineEdit()
-        self.enabled = QCheckBox("Sync this light")
+        self.enabled = ToggleSwitch("Sync this light")
+        self.in_area = ToggleSwitch()  # shown while an area is active
+        self.in_area.setToolTip("Areas are sets of lights to sync on their own; choose one at the top of the window")
         self.kind = QComboBox()
         self.kind.addItem("Lamp / bulb (one colour)", "lamp")
         self.kind.addItem("Addressable strip (per-LED)", "strip")
@@ -87,7 +105,7 @@ class LightPanel(QWidget):
         self.entity.setEditable(True)
         self.entity.setToolTip("ESPHome light object_id, e.g. 'living_room_lamp'")
         self.refresh_btn = QPushButton("↻")
-        self.refresh_btn.setFixedWidth(32)
+        set_kind(self.refresh_btn, "icon")
         self.refresh_btn.setToolTip("Fetch the device's lights")
         ent_row = QHBoxLayout()
         ent_row.setContentsMargins(0, 0, 0, 0)
@@ -102,7 +120,7 @@ class LightPanel(QWidget):
         self.hue_channels.setToolTip("Entertainment channels this light drives. A lamp sends its colour to every "
                                      "ticked channel; a strip sends one LED per ticked channel, in order.")
         self.hue_refresh = QPushButton("↻")
-        self.hue_refresh.setFixedWidth(32)
+        set_kind(self.hue_refresh, "icon")
         self.hue_refresh.setToolTip("Reload the bridge's entertainment area")
         hue_row = QHBoxLayout()
         hue_row.setContentsMargins(0, 0, 0, 0)
@@ -132,14 +150,18 @@ class LightPanel(QWidget):
         self.layout_combo = QComboBox()
         self.layout_combo.addItem(ROOM_LAYOUT)
         self.layout_combo.addItems(list(SCREEN_PRESETS))
-        self.reverse = QCheckBox("LED order reversed")
+        self.reverse = ToggleSwitch("LED order reversed")
         self.manual = QLabel()
         self.reset_region = QPushButton("Use automatic region")
         self.identify = QPushButton("Identify (flash)")
 
+        self.height_row = slider_row(self.height)
+        form.addRow(_section("Light"))
         form.addRow("Name", self.name)
         form.addRow("", self.enabled)
+        form.addRow("", self.in_area)
         form.addRow("Type", self.kind)
+        form.addRow(_section("Connection"))
         form.addRow("Output", self.transport)
         form.addRow("Device", self.device)
         form.addRow("Light", self.entity_row)
@@ -150,17 +172,19 @@ class LightPanel(QWidget):
         form.addRow("Universe", self.universe)
         form.addRow("Effect", self.udp_effect)
         form.addRow("LED count", self.leds)
+        form.addRow(_section("Placement and colour"))
         form.addRow("Strip layout", self.layout_combo)
         form.addRow("", self.reverse)
-        form.addRow("Height", self.height)
-        form.addRow("Sample size", self.size)
-        form.addRow("Brightness", self.brightness)
+        form.addRow("Height", self.height_row)
+        form.addRow("Sample size", slider_row(self.size))
+        form.addRow("Brightness", slider_row(self.brightness))
         form.addRow("Region", self.manual)
         form.addRow("", self.reset_region)
         form.addRow("", self.identify)
 
         self.name.textEdited.connect(self._on_name)
-        self.enabled.toggled.connect(lambda v: self._set("enabled", v, "output"))
+        self.enabled.toggled.connect(lambda v: self._set("enabled", v, "membership"))
+        self.in_area.toggled.connect(self._on_in_area)
         self.kind.currentIndexChanged.connect(self._on_kind)
         self.transport.currentIndexChanged.connect(self._on_transport)
         self.device.currentIndexChanged.connect(self._on_device)
@@ -256,7 +280,7 @@ class LightPanel(QWidget):
     def set_light(self, light: LightConfig | None) -> None:
         self.light = light
         self.empty.setVisible(light is None)
-        self.body.setVisible(light is not None)
+        self.scroll.setVisible(light is not None)
         if light is None:
             return
         self._loading = True
@@ -286,6 +310,26 @@ class LightPanel(QWidget):
         self._loading = False
         self.update_visibility()
         self.update_region_label()
+        self.update_area()
+
+    def update_area(self) -> None:
+        """Show whether the light is in the active area (no such row while the full room is active)."""
+        if self.light is None:
+            return
+        area = self.config.area()
+        was, self._loading = self._loading, True
+        self.in_area.setText(f"Part of the “{area.name}” area" if area else "")
+        self.in_area.setChecked(area is not None and self.light.id in area.light_ids)
+        self._loading = was
+        self.form.setRowVisible(self.in_area, area is not None)
+
+    def _on_in_area(self, on: bool) -> None:
+        area = self.config.area()
+        if self._loading or self.light is None or area is None:
+            return
+        ids = [i for i in area.light_ids if i != self.light.id]
+        area.light_ids = [*ids, self.light.id] if on else ids
+        self.changed.emit("membership")
 
     def update_region_label(self) -> None:
         if self.light is None:
@@ -314,7 +358,7 @@ class LightPanel(QWidget):
             self.leds: strip and not hue,  # Hue: one LED per channel
             self.layout_combo: strip,
             self.reverse: strip,
-            self.height: not strip or light.strip_layout == "room",
+            self.height_row: not strip or light.strip_layout == "room",
             self.manual: not strip,
             self.reset_region: not strip,
             self.identify: api or hue,

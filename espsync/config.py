@@ -131,6 +131,15 @@ class LightConfig:
 
 
 @dataclass
+class AreaConfig:
+    """A named set of lights to sync on their own, e.g. "Desk" (see AppConfig.active_area)."""
+
+    id: str = field(default_factory=new_id)
+    name: str = "Area"
+    light_ids: list[str] = field(default_factory=list)  # LightConfig.id
+
+
+@dataclass
 class RoomConfig:
     width_m: float = 4.0
     depth_m: float = 4.0
@@ -203,6 +212,10 @@ class AppConfig:
     devices: list[DeviceConfig] = field(default_factory=list)
     hue_bridges: list[HueBridgeConfig] = field(default_factory=list)
     lights: list[LightConfig] = field(default_factory=list)
+    # Areas: sync (and set scenes on) only some of the lights.  active_area is
+    # an AreaConfig.id; "" (or an id that no longer exists) = the full room.
+    areas: list[AreaConfig] = field(default_factory=list)
+    active_area: str = ""
     room: RoomConfig = field(default_factory=RoomConfig)
     sync: SyncSettings = field(default_factory=SyncSettings)
     updates: UpdateConfig = field(default_factory=UpdateConfig)
@@ -217,6 +230,27 @@ class AppConfig:
 
     def light(self, light_id: str) -> LightConfig | None:
         return next((l for l in self.lights if l.id == light_id), None)
+
+    def area(self, area_id: str | None = None) -> AreaConfig | None:
+        """The area with this id; no argument = the active one (None = the full room)."""
+        wanted = self.active_area if area_id is None else area_id
+        return next((a for a in self.areas if a.id == wanted), None) if wanted else None
+
+    def is_active(self, light: LightConfig) -> bool:
+        """Whether sync and scenes drive this light: it is enabled and in the active area."""
+        if not light.enabled:
+            return False
+        area = self.area()
+        return area is None or light.id in area.light_ids
+
+    def active_lights(self) -> list[LightConfig]:
+        return [l for l in self.lights if self.is_active(l)]
+
+    def prune_areas(self) -> None:
+        """Forget lights that no longer exist."""
+        known = {l.id for l in self.lights}
+        for area in self.areas:
+            area.light_ids = [i for i in area.light_ids if i in known]
 
     # -- (de)serialisation -----------------------------------------------------
     def to_dict(self) -> dict[str, Any]:
